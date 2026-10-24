@@ -6,10 +6,13 @@
 #  تواناکان / Features:
 #   - دەق (text) ............ وەرگێڕان ڕاستەوخۆ بۆ کوردی سۆرانی
 #   - PDF / DOCX / PPTX / TXT / SRT ... وەرگێڕانی فایل، دەرچووەکە هەمان جۆر
+#        + کۆپی PDF بۆ هەموو فایلەکان (DOCX/PPTX بە LibreOffice بۆ باوەڕپێکراوی شێواز)
 #   - ڤیدیۆ / دەنگ (فایل یان لینکی YouTube / Facebook / TikTok / ...)
-#        دەنگ -> نووسین (faster-whisper) -> وەرگێڕان -> SRT + Word بە سۆرانی
+#        دەنگ -> نووسین (faster-whisper) -> وەرگێڕان -> SRT + Word + PDF بە سۆرانی
+#        + ژێرنووسی کوردی ڕاستەوخۆ لەسەر ڤیدیۆکە دادەنرێت (burn-in بە ffmpeg/libass)
 #   - بزوێنەری وەرگێڕان: Google Translate (بەخۆڕایی) + GLM/Z.ai (یەدەگ)
-#   - بۆ GitHub Actions دروستکراوە (polling بە خشتە، بێ سێرڤەر)
+#   - لە GitHub Actions ٢٤/٧ کار دەکات: هەر خولێک ٤٥ خولەکە و لە کۆتایی خولێکی نوێ
+#     خۆکارانە دەست پێدەکات (زنجیرەی بێکۆتایی) + cron ی پاشەکەوت هەر ١٠ خولەک
 #
 #  کاردانەوەی خێرا: python bot.py --check   (پشکنینی ژینگە)
 # =====================================================================
@@ -43,10 +46,13 @@ def env_int(name, default):
 BOT_TOKEN         = (os.getenv("BOT_TOKEN") or "").strip()
 TARGET_LANG       = (os.getenv("TARGET_LANG") or "ckb").strip()      # ckb = کوردی سۆرانی
 STATE_FILE        = (os.getenv("STATE_FILE") or "state.json").strip()
-RUN_SECONDS       = env_int("RUN_SECONDS", 240)      # ماوەی خولی polling بۆ هەر run یەک
-IDLE_EXIT_SECONDS = env_int("IDLE_EXIT_SECONDS", 90)
-HEAVY_BUDGET      = env_int("HEAVY_BUDGET", 1500)    # زۆرترین کات بۆ یەک ڤیدیۆ/دەنگ (چرکە)
+RUN_SECONDS       = env_int("RUN_SECONDS", 2700)     # ماوەی خولی polling (بنەڕەت ٤٥ خولەک)
+IDLE_EXIT_SECONDS = env_int("IDLE_EXIT_SECONDS", 0)  # 0 = لەکارخراو — بۆت تا کۆتایی خول ئۆنلاین دەمێنێت
+HEAVY_BUDGET      = env_int("HEAVY_BUDGET", 2400)    # زۆرترین کات بۆ یەک ڤیدیۆ/دەنگ (چرکە)
 MAX_VIDEO_MINUTES = env_int("MAX_VIDEO_MINUTES", 0)  # 0 = بێ سنوور
+BURN_SUBTITLES    = env_int("BURN_SUBTITLES", 1)     # 1 = ژێرنووسی کوردی لەسەر ڤیدیۆ دادەنرێت
+BURN_MAX_MINUTES  = env_int("BURN_MAX_MINUTES", 30)  # زۆرترین درێژی ڤیدیۆ بۆ سووتاندنی ژێرنووس
+SEND_PDF_COPY     = env_int("SEND_PDF_COPY", 1)      # 1 = کۆپی PDF بۆ هەموو فایلەکان دەنێردرێت
 WHISPER_MODEL     = (os.getenv("WHISPER_MODEL") or "base").strip()
 SOURCE_LANG       = (os.getenv("SOURCE_LANG") or "").strip() or None  # None = خۆکار
 GLM_API_KEY       = (os.getenv("GLM_API_KEY") or os.getenv("ZAI_API_KEY") or "").strip()
@@ -75,13 +81,15 @@ WELCOME = (
     "\n"
     "چی دەکەم:\n"
     "• هەر دەقێک بنێری (هەر زمانێک بێت) — ڕاستەوخۆ بە سۆرانی وەریدەگێڕمەوە.\n"
-    "• فایلی PDF، Word، PowerPoint، TXT یان SRT بنێری — وەرگێڕدراوەکە بە هەمان جۆری فایل دەنێرمەوە.\n"
+    "• فایلی PDF، Word، PowerPoint، TXT یان SRT بنێری — وەرگێڕدراوەکە بە هەمان جۆری فایل\n"
+    "  دەنێرمەوە + کۆپی PDF یش لەگەڵ دەکەم.\n"
     "• ڤیدیۆ یان دەنگ بنێری (فایل)، یان لینکی YouTube / Facebook / TikTok — دەنگەکە دەخوێنمەوە،\n"
-    "  وەریدەگێڕم و بە فایلی SRT و Word دەینێرم.\n"
+    "  وەریدەگێڕم و بە فایلی SRT و Word و PDF دەینێرم + ژێرنووسی کوردی لەسەر ڤیدیۆکە دادەنێم.\n"
     "\n"
     "تێبینی گرنگ:\n"
     "• فایلی ڕاستەوخۆ دەبێت کەمتر بێت لە ٢٠ مێگابایت (سنووری تەلەگرام).\n"
-    "• لەبەر ئەوەی لە GitHub Actions کار دەکەم، وەڵامەکەم لەوانەیە تا چەند خولەکێک بخایەنێت."
+    "• بەردەوام ئۆنلاینم (٢٤ کاتژمێر / ٧ ڕۆژ)؛ تەنها لە کاتی گۆڕینی خولەکە (هەر نزیکەی کاتژمێرێک)\n"
+    "  لەوانەیە وەڵامەکەم چەند خولەکێک دابخرێت."
 )
 
 PROG_DOWNLOAD   = "چاوەڕێ بکە... ڤیدیۆکە داگیر دەم. (بەپێی قەبارەکەی چەند خولەکێک دەخایەنێت)"
@@ -89,8 +97,17 @@ MSG_MEDIA_START = "چاوەڕێ بکە... فایلەکە دادەگرم و دە�
 MSG_DOC_START   = "چاوەڕێ بکە... فایلەکە وەرگێڕ دەم. (بۆ فایلە گەورەکان چەند خولەکێک دەخایەنێت)"
 MSG_DOWNLOADED  = "داگیرا: {title}\nماوە: {dur} — ئێستا دەنگ دەخوێنمەوە..."
 MSG_TRANSCRIBED = "دەنگ خرایە سەر نووسین: زمانی «{lang}» — ماوە {dur} — {n} بەش.\nئێستا وەرگێڕان بۆ سۆرانی دەست پێدەکات..."
-MSG_VIDEO_DONE  = "وەرگێڕان تەواو بوو: فایلی SRT بۆ ژێرنووسی ڤیدیۆ و فایلی Word بۆ خوێندنەوە."
+MSG_VIDEO_DONE  = "وەرگێڕان تەواو بوو: فایلی SRT بۆ ژێرنووس + فایلی Word و PDF بۆ خوێندنەوە."
 CAPTION_DOC     = "وەرگێڕانی کوردی سۆرانی ئامادەیە."
+CAPTION_PDF     = "هەمان وەرگێڕان بە شێوەی PDF."
+MSG_BURN_START   = "ئێستا ژێرنووسی کوردی لەسەر ڤیدیۆکە دادەنێم... (ئەم قۆناغە چەند خولەکێک دەخایەنێت)"
+CAPTION_BURN     = "ڤیدیۆکە بە ژێرنووسی کوردی سۆرانی."
+MSG_BURN_FAIL    = ("بەداخەوە دانانی ژێرنووس لەسەر ڤیدیۆ سەرنەچوو؛ "
+                    "بەڵام فایلەکانی SRT و Word و PDF ئامادەن.")
+MSG_BURN_SKIPPED = ("ڤیدیۆکە لە {max} خولەک درێژترە، بۆیە ژێرنووسەکە نەخرایە سەر ڤیدیۆ "
+                    "(سنووری کاتی GitHub Actions).\n"
+                    "فایلی SRT ئامادەیە — دەتوانیت بە بەرنامەی مۆنتاژ یان خزمەتگوزاری "
+                    "کاپشن بیخەیتە سەر ڤیدیۆکە.")
 MSG_UNSUPPORTED = ("ئەم جۆرە پەیام/فایلە پشتگیری نەکراوە.\n"
                    "پشتگیریکراو: PDF، Word (docx)، PowerPoint (pptx)، TXT، SRT، "
                    "ڤیدیۆ، دەنگ، لینکی ڤیدیۆ، یان دەقی ئاسایی.")
@@ -390,7 +407,7 @@ SRT_BLOCK_RE = re.compile(
 )
 
 
-def process_srt(data):
+def parse_srt(data):
     text = data.decode("utf-8", errors="replace").replace("\r\n", "\n").replace("\r", "\n")
     cues = []
     for m in SRT_BLOCK_RE.finditer(text):
@@ -399,14 +416,24 @@ def process_srt(data):
         body = m.group(3).strip()
         if body:
             cues.append((stamp, body))
+    return cues
+
+
+def translate_srt(data):
+    """(srt_وەرگێڕدراو, cues, outs) دەگەڕێنێتەوە — بۆ SRT و PDF ی لگەڵ."""
+    cues = parse_srt(data)
     if not cues:
-        return ""
+        return "", [], []
     with ThreadPoolExecutor(6) as ex:
         outs = list(ex.map(translate_item, [c[1] for c in cues]))
     parts = []
     for i, ((stamp, _), out) in enumerate(zip(cues, outs), 1):
         parts.append("%d\n%s\n%s\n" % (i, stamp, (out or "").strip()))
-    return "\n".join(parts)
+    return "\n".join(parts), cues, outs
+
+
+def process_srt(data):
+    return translate_srt(data)[0]
 
 
 # --- DOCX (Word) — گۆڕینی دەقی پاراگرافەکان لە شوێنی خۆیان (شێواز دەمێنێتەوە) ---
@@ -600,6 +627,8 @@ def ensure_arabic_font(workdir):
     fdir = os.path.join(workdir, "fonts")
     os.makedirs(fdir, exist_ok=True)
     fp = os.path.join(fdir, "arabic.ttf")
+    if os.path.exists(fp) and os.path.getsize(fp) > 100_000:
+        return fp            # فۆنتەکە پێشتر دابەزیوە — دووبارە داگری ناکەین
     for url in FONT_URLS:
         try:
             r = SESSION.get(url, timeout=90)
@@ -698,6 +727,263 @@ def build_pdf(pages_texts, out_path, title="Sorani Translation"):
     return out_path
 
 
+# ---------- PDF ی گشتی: بلۆکەکان + گۆڕین بە LibreOffice (کۆپی PDF) ----------
+
+_PDF_STYLES = {
+    "title":  (16.0, 24.0, 10.0),
+    "h1":     (15.0, 22.0, 8.0),
+    "h2":     (13.5, 20.0, 6.0),
+    "body":   (12.5, 21.0, 4.0),
+    "bullet": (12.5, 21.0, 3.0),
+    "meta":   (10.5, 17.0, 3.0),
+}
+
+
+def build_pdf_blocks(blocks, out_path, title="Sorani Translation"):
+    """PDF ی RTL لە لیستی بلۆک (جۆر، دەق). جۆرەکان: title/h1/h2/body/bullet/meta"""
+    workdir = os.path.dirname(os.path.abspath(out_path)) or "."
+    font_path = ensure_arabic_font(workdir)
+    if not font_path:
+        raise RuntimeError("no Arabic font available (download failed)")
+    pdfmetrics.registerFont(TTFont("KurdishFont", font_path))
+    W, H = A4
+    M = 46.0
+    maxw = W - 2 * M
+    c = rl_canvas.Canvas(out_path, pagesize=A4)
+    c.setTitle((title or "Sorani Translation")[:120])
+    c.setAuthor("Sorani Translator Bot")
+
+    pg = {"n": 1}
+
+    def draw_footer():
+        c.setFont("KurdishFont", 9)
+        c.setFillColorRGB(0.45, 0.45, 0.45)
+        c.drawRightString(W - M, H - M + 8, _disp(_shape("پەڕەی %d" % pg["n"])))
+        c.setFillColorRGB(0, 0, 0)
+
+    def start_page():
+        c.showPage()
+        pg["n"] += 1
+        draw_footer()
+        return H - M
+
+    draw_footer()
+    y = H - M - 10
+    if title:
+        for ln in _wrap_rtl_lines(title, "KurdishFont", 16.0, maxw):
+            c.setFont("KurdishFont", 16.0)
+            c.drawRightString(W - M, y, ln)
+            y -= 24.0
+        y -= 10.0
+
+    for kind, text in blocks:
+        text = (text or "").strip()
+        if not text:
+            continue
+        size, lead, gap = _PDF_STYLES.get(kind, _PDF_STYLES["body"])
+        if kind == "bullet":
+            text = "• " + text
+        for ln in _wrap_rtl_lines(text, "KurdishFont", size, maxw):
+            if y < M + lead:
+                y = start_page()
+            if ln:
+                c.setFont("KurdishFont", size)
+                c.setFillColorRGB(0.1, 0.1, 0.1) if kind in ("title", "h1", "h2") \
+                    else c.setFillColorRGB(0, 0, 0)
+                c.drawRightString(W - M, y, ln)
+            y -= lead
+        y -= gap
+    c.save()
+    return out_path
+
+
+def _soffice_bin():
+    return shutil.which("soffice") or shutil.which("libreoffice")
+
+
+def office_to_pdf(src_path, out_dir, timeout=420):
+    """گۆڕینی DOCX/PPTX بۆ PDF بە LibreOffice — هەمان شێواز و وێنەکان دەمێننەوە.
+    ئەگەر نەکرا None دەگەڕێنێتەوە (کۆدەکە بە ReportLab بەردەوام دەبێت)."""
+    soff = _soffice_bin()
+    if not soff:
+        log.info("soffice not available — using ReportLab fallback")
+        return None
+    out_dir = os.path.abspath(out_dir)
+    os.makedirs(out_dir, exist_ok=True)
+    prof = tempfile.mkdtemp(prefix="lo_profile_")
+    cmd = [soff, "-env:UserInstallation=file://" + prof,
+           "--headless", "--norestore", "--nolockcheck",
+           "--convert-to", "pdf", "--outdir", out_dir, os.path.abspath(src_path)]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except Exception as e:
+        log.warning("soffice failed: %s", e)
+        return None
+    finally:
+        shutil.rmtree(prof, ignore_errors=True)
+    stem = os.path.splitext(os.path.basename(src_path))[0]
+    out = os.path.join(out_dir, stem + ".pdf")
+    if res.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+        log.warning("soffice convert failed: rc=%s %s",
+                    res.returncode, (res.stderr or "")[-300:])
+        return None
+    log.info("LibreOffice converted %s -> %s", os.path.basename(src_path), os.path.basename(out))
+    return out
+
+
+def register_font_fontconfig(font_path):
+    """فۆنتەکە دەخاتە ~/.fonts بۆ ئەوەی LibreOffice بیبینێت (بۆ نووسینی عەرەبی/کوردی)."""
+    try:
+        fdir = os.path.expanduser("~/.fonts")
+        os.makedirs(fdir, exist_ok=True)
+        dst = os.path.join(fdir, "bot-arabic.ttf")
+        if os.path.abspath(font_path) != os.path.abspath(dst):
+            shutil.copyfile(font_path, dst)
+        subprocess.run(["fc-cache", "-f"], capture_output=True, timeout=90)
+    except Exception as e:
+        log.warning("fontconfig register failed: %s", e)
+
+
+def ensure_font_and_register(workdir):
+    fp = ensure_arabic_font(workdir)
+    if fp:
+        register_font_fontconfig(fp)
+    return fp
+
+
+def _docx_para_block(p):
+    t = (p.text or "").strip()
+    if not t:
+        return []
+    try:
+        sname = ((p.style and p.style.name) or "").lower()
+    except Exception:
+        sname = ""
+    if sname == "title" or "heading 1" in sname:
+        return [("h1", t)]
+    if "heading" in sname:
+        return [("h2", t)]
+    if "list" in sname or "bullet" in sname:
+        return [("bullet", t)]
+    return [("body", t)]
+
+
+def blocks_from_docx(path):
+    """بلۆکەکان لە فایلی Word (پاراگراف + خشتە بە هەمان ڕیزبەندی)."""
+    doc = DocxDocument(path)
+    blocks = []
+    try:
+        from docx.oxml.table import CT_Tbl
+        from docx.oxml.text.paragraph import CT_P
+        from docx.table import Table as _Tbl
+        from docx.text.paragraph import Paragraph as _Para
+        for child in doc.element.body.iterchildren():
+            if isinstance(child, CT_P):
+                blocks.extend(_docx_para_block(_Para(child, doc)))
+            elif isinstance(child, CT_Tbl):
+                try:
+                    for row in _Tbl(child, doc).rows:
+                        cells = []
+                        for cell in row.cells:
+                            ct = " ".join(x.strip() for x in (cell.text or "").splitlines()
+                                          if x.strip())
+                            if ct:
+                                cells.append(ct)
+                        if cells:
+                            blocks.append(("body", " | ".join(cells)))
+                except Exception:
+                    pass
+    except Exception:
+        for p in doc.paragraphs:
+            blocks.extend(_docx_para_block(p))
+    return [b for b in blocks if (b[1] or "").strip()]
+
+
+def blocks_from_pptx(path):
+    """بلۆکەکان لە فایلی PowerPoint (سلاید بە سلاید)."""
+    prs = Presentation(path)
+    blocks = []
+    for i, slide in enumerate(prs.slides, 1):
+        slide_blocks = []
+        for sh in _iter_shapes(slide.shapes):
+            try:
+                if sh.has_text_frame:
+                    for para in _ppt_paras(sh.text_frame):
+                        t = (para.text or "").strip()
+                        if t and has_letters(t):
+                            slide_blocks.append(
+                                ("bullet" if getattr(para, "level", 0) else "body", t))
+            except Exception:
+                pass
+        if slide_blocks:
+            blocks.append(("h2", "سلایدی %d" % i))
+            blocks.extend(slide_blocks)
+    return blocks
+
+
+def blocks_from_plain(text):
+    blocks = []
+    for ln in (text or "").splitlines():
+        ln = ln.strip()
+        if ln:
+            blocks.append(("body", ln))
+    return blocks
+
+
+def blocks_from_transcript(cues, texts):
+    """بلۆکی نووسینی دەنگ: cues دەکرێت (stamp_str, text) یان (st, en, text) بێت."""
+    blocks = []
+    for cue, t in zip(cues, texts):
+        t = (t or "").strip()
+        if not t:
+            continue
+        raw = cue[0] if len(cue) == 2 else ts(cue[0])
+        stamp = str(raw).split("-->")[0].strip()
+        blocks.append(("meta", "[%s]" % stamp))
+        blocks.append(("body", t))
+    return blocks
+
+
+def docx_to_pdf(docx_path, workdir, title):
+    """PDF بۆ Word: سەرەتا LibreOffice (شێوازی ڕەسەن)، ئەگەر نەبوو ReportLab."""
+    out = None
+    try:
+        out = office_to_pdf(docx_path, workdir)
+    except Exception as e:
+        log.warning("office_to_pdf(docx) error: %s", e)
+    if out:
+        return out
+    try:
+        blocks = blocks_from_docx(docx_path)
+        if not blocks:
+            return None
+        stem = sanitize(os.path.splitext(os.path.basename(docx_path))[0])
+        return build_pdf_blocks(blocks, os.path.join(workdir, stem + ".pdf"), title)
+    except Exception as e:
+        log.warning("docx pdf fallback failed: %s", e)
+        return None
+
+
+def pptx_to_pdf(pptx_path, workdir, title):
+    """PDF بۆ PowerPoint: سەرەتا LibreOffice، ئەگەر نەبوو ReportLab."""
+    out = None
+    try:
+        out = office_to_pdf(pptx_path, workdir)
+    except Exception as e:
+        log.warning("office_to_pdf(pptx) error: %s", e)
+    if out:
+        return out
+    try:
+        blocks = blocks_from_pptx(pptx_path)
+        if not blocks:
+            return None
+        stem = sanitize(os.path.splitext(os.path.basename(pptx_path))[0])
+        return build_pdf_blocks(blocks, os.path.join(workdir, stem + ".pdf"), title)
+    except Exception as e:
+        log.warning("pptx pdf fallback failed: %s", e)
+        return None
+
+
 # ----------------------- ڤیدیۆ / دەنگ -----------------------------
 
 def ffmpeg_extract(src, dst):
@@ -714,7 +1000,119 @@ def ffmpeg_extract(src, dst):
         raise BotError(ERR_AUDIO)
 
 
+def ffprobe_duration(path):
+    if not shutil.which("ffprobe"):
+        return 0.0
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=nw=1:nk=1", path],
+            capture_output=True, text=True, timeout=60)
+        return float(res.stdout.strip()) if res.returncode == 0 else 0.0
+    except Exception:
+        return 0.0
+
+
+def ffprobe_has_video(path):
+    """ئایا فایلەکە تراکێکی ڤیدیۆی تێدایە؟ (بۆ دەنگی خاڵیس False)"""
+    if not shutil.which("ffprobe"):
+        return False
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=codec_type", "-of", "csv=p=0", path],
+            capture_output=True, text=True, timeout=60)
+        return "video" in (res.stdout or "")
+    except Exception:
+        return False
+
+
+def _ass_font_family(font_path):
+    stem = os.path.splitext(os.path.basename(font_path or ""))[0]
+    stem = stem.split("-")[0]
+    fam = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", stem)
+    return fam.strip() or "Amiri"
+
+
+def _ass_style(font_path):
+    fam = _ass_font_family(font_path)
+    return ("FontName=%s,Fontsize=22,PrimaryColour=&H00FFFFFF,"
+            "OutlineColour=&H00000000,BackColour=&H80000000,BorderStyle=1,"
+            "Outline=2,Shadow=1,Alignment=2,MarginV=28,Spacing=0.3" % fam)
+
+
+def burn_subtitles(src_video, srt_path, out_path, workdir, timeout=2400):
+    """ژێرنووسی کوردی دەکاتەوە سەر خۆی ڤیدیۆکە (ffmpeg + libass).
+    فۆنتی عەرەبی/کوردی لە fontsdir دا دەدۆزرێتەوە. ئەگەر سەرنەچوو None."""
+    if not shutil.which("ffmpeg"):
+        raise BotError(ERR_FFMPEG)
+    font_path = ensure_arabic_font(workdir)
+    cwd = os.path.abspath(workdir)
+    srt_local = os.path.join(cwd, "burn_subs.srt")
+    shutil.copyfile(srt_path, srt_local)
+    ext = os.path.splitext(src_video)[1] or ".mp4"
+    src_local = os.path.join(cwd, "burn_src" + ext)
+    if os.path.abspath(src_video) != os.path.abspath(src_local):
+        shutil.copyfile(src_video, src_local)
+    fontsdir = os.path.dirname(font_path) if font_path else "/usr/share/fonts"
+    vf = "subtitles=burn_subs.srt:fontsdir=%s:force_style='%s'" % (fontsdir, _ass_style(font_path))
+    out_tmp = os.path.join(cwd, "burn_out.mp4")
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src_local,
+           "-vf", vf,
+           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+           "-c:a", "aac", "-b:a", "160k",
+           "-movflags", "+faststart", out_tmp]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True,
+                             timeout=timeout, cwd=cwd)
+    except subprocess.TimeoutExpired:
+        raise BotError(ERR_LONG)
+    if res.returncode != 0 or not os.path.exists(out_tmp) or os.path.getsize(out_tmp) == 0:
+        log.warning("burn failed: %s", (res.stderr or "")[-600:])
+        return None
+    # ئەگەر قەبارەکە گەورەترە لە سنووری تەلەگرام، بە bitrate ی ژمێریارکراو دووبارە بیکەوە
+    if os.path.getsize(out_tmp) > 45 * 1024 * 1024:
+        dur = ffprobe_duration(out_tmp) or ffprobe_duration(src_local)
+        if dur > 0:
+            kbps = max(300, int(40 * 1024 * 1024 * 8.0 / dur / 1000))
+            out_tmp2 = os.path.join(cwd, "burn_out2.mp4")
+            cmd2 = ["ffmpeg", "-y", "-loglevel", "error", "-i", out_tmp,
+                    "-c:v", "libx264", "-preset", "veryfast",
+                    "-b:v", "%dk" % kbps, "-maxrate", "%dk" % int(kbps * 1.4),
+                    "-bufsize", "%dk" % (kbps * 3),
+                    "-c:a", "copy", "-movflags", "+faststart", out_tmp2]
+            try:
+                subprocess.run(cmd2, capture_output=True, text=True,
+                               timeout=timeout, cwd=cwd)
+                if os.path.exists(out_tmp2) and os.path.getsize(out_tmp2) > 0:
+                    os.replace(out_tmp2, out_tmp)
+            except Exception:
+                pass
+    shutil.move(out_tmp, out_path)
+    return out_path
+
+
+def tg_send_video(chat, path, caption=None):
+    payload = {"chat_id": chat, "supports_streaming": "true"}
+    if caption:
+        payload["caption"] = caption[:1000]
+    try:
+        with open(path, "rb") as fh:
+            tg_call("sendVideo", payload,
+                    files={"video": (os.path.basename(path), fh)}, timeout=900)
+        return True
+    except Exception as e:
+        log.warning("sendVideo failed (%s) — fallback to sendDocument", e)
+        try:
+            tg_send_doc(chat, path, caption)
+            return True
+        except Exception as e2:
+            log.error("video send fallback failed: %s", e2)
+            return False
+
+
 _whisper_model = None
+_HARD_DEADLINE = None   # کۆتایی کاتی خول — لە main() دادەنرێت (بۆ ڕاوەستاندنی ئەرکی قورس)
 
 
 def get_whisper():
@@ -737,6 +1135,8 @@ def transcribe_file(wav_path, t0):
     segs = []
     for s in seg_iter:
         if time.time() - t0 > HEAVY_BUDGET:
+            raise BotError(ERR_LONG)
+        if _HARD_DEADLINE and time.time() > _HARD_DEADLINE:
             raise BotError(ERR_LONG)
         txt = (s.text or "").strip()
         if txt:
@@ -782,7 +1182,8 @@ def ytdl_download(url, workdir):
     import yt_dlp.utils
 
     opts = {
-        "format": "bestaudio/best",
+        "format": ("best[height<=720]+bestaudio/best[height<=720]/bestaudio/best"
+                   if BURN_SUBTITLES else "bestaudio/best"),  # ڤیدیۆ پێویستە بۆ ژێرنووس
         "outtmpl": os.path.join(workdir, "src.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
@@ -844,10 +1245,41 @@ def run_speech_pipeline(src_path, chat, workdir):
         fh.write(render_srt(cues, outs))
     docx_path = os.path.join(workdir, "sorani_%s.docx" % base)
     build_transcript_docx(cues, outs, docx_path, title="وەرگێڕانی کوردی سۆرانی — %s" % base)
+    pdf_path = None
+    if SEND_PDF_COPY:
+        try:
+            blocks = blocks_from_transcript(cues, outs)
+            pdf_path = build_pdf_blocks(
+                blocks, os.path.join(workdir, "sorani_%s.pdf" % base),
+                title="وەرگێڕانی کوردی سۆرانی — %s" % base)
+        except Exception as e:
+            log.warning("transcript PDF failed: %s", e)
     preview = "\n".join(x for x in outs if x.strip())[:700]
     tg_send(chat, preview + ("…" if len(preview) == 700 else ""))
     tg_send_doc(chat, srt_path, MSG_VIDEO_DONE)
     tg_send_doc(chat, docx_path, None)
+    if pdf_path:
+        tg_send_doc(chat, pdf_path, None)
+    # ---- ژێرنووسی کوردی لەسەر خۆی ڤیدیۆ (burn-in) ----
+    if BURN_SUBTITLES:
+        v_dur = float(dur or 0) or ffprobe_duration(src_path)
+        if not ffprobe_has_video(src_path):
+            log.info("burn skipped: source has no video stream (audio only)")
+        elif v_dur and v_dur > BURN_MAX_MINUTES * 60:
+            _safe_send(chat, MSG_BURN_SKIPPED.format(max=BURN_MAX_MINUTES))
+        else:
+            tg_send(chat, MSG_BURN_START)
+            tg_action(chat, "upload_video")
+            vid_out = os.path.join(workdir, "sorani_%s_subtitled.mp4" % base)
+            try:
+                vid_path = burn_subtitles(src_path, srt_path, vid_out, workdir)
+            except BotError as e:
+                _safe_send(chat, "هەڵە: %s" % e)
+                vid_path = None
+            if vid_path and os.path.exists(vid_path) and os.path.getsize(vid_path) <= 49 * 1024 * 1024:
+                tg_send_video(chat, vid_path, CAPTION_BURN)
+            else:
+                _safe_send(chat, MSG_BURN_FAIL)
 
 
 # --------------------------- هاندەرەکان -------------------------------
@@ -890,6 +1322,7 @@ def handle_document_file(tg_file, name, chat, workdir):
         data = fh.read()
     stem = sanitize(os.path.splitext(os.path.basename(name))[0]) or "file"
     out_path = None
+    pdf_path = None
     caption = CAPTION_DOC
 
     if kind == ".pdf":
@@ -911,29 +1344,62 @@ def handle_document_file(tg_file, name, chat, workdir):
         out_path = os.path.join(workdir, "sorani_%s.docx" % stem)
         with open(out_path, "wb") as fh:
             fh.write(process_docx(data))
+        if SEND_PDF_COPY:
+            try:
+                ensure_font_and_register(workdir)
+                pdf_path = docx_to_pdf(out_path, workdir, title=stem)
+            except Exception as e:
+                log.warning("docx→pdf failed: %s", e)
 
     elif kind == ".pptx":
         out_path = os.path.join(workdir, "sorani_%s.pptx" % stem)
         with open(out_path, "wb") as fh:
             fh.write(process_pptx(data))
+        if SEND_PDF_COPY:
+            try:
+                ensure_font_and_register(workdir)
+                pdf_path = pptx_to_pdf(out_path, workdir, title=stem)
+            except Exception as e:
+                log.warning("pptx→pdf failed: %s", e)
 
     elif kind == ".txt":
         out_path = os.path.join(workdir, "sorani_%s.txt" % stem)
         with open(out_path, "wb") as fh:
             fh.write(process_txt(data))
+        if SEND_PDF_COPY:
+            try:
+                with open(out_path, "r", encoding="utf-8") as fh:
+                    ttext = fh.read()
+                blocks = blocks_from_plain(ttext)
+                if blocks:
+                    pdf_path = build_pdf_blocks(
+                        blocks, os.path.join(workdir, "sorani_%s.pdf" % stem),
+                        title=stem)
+            except Exception as e:
+                log.warning("txt→pdf failed: %s", e)
 
     elif kind == ".srt":
-        srt_out = process_srt(data)
+        srt_out, scues, souts = translate_srt(data)
         if not srt_out:
             raise BotError(ERR_GEN)
         out_path = os.path.join(workdir, "sorani_%s.srt" % stem)
         with open(out_path, "w", encoding="utf-8") as fh:
             fh.write(srt_out)
+        if SEND_PDF_COPY and scues:
+            try:
+                blocks = blocks_from_transcript(scues, souts)
+                pdf_path = build_pdf_blocks(
+                    blocks, os.path.join(workdir, "sorani_%s.pdf" % stem),
+                    title=stem)
+            except Exception as e:
+                log.warning("srt→pdf failed: %s", e)
 
     if out_path and os.path.exists(out_path):
         tg_send_doc(chat, out_path, caption)
     else:
         raise BotError(ERR_GEN)
+    if pdf_path and os.path.exists(pdf_path):
+        tg_send_doc(chat, pdf_path, CAPTION_PDF)
 
 
 def handle_media_file(tg_file, chat, workdir, name_hint="media"):
@@ -1030,6 +1496,9 @@ def self_check():
     print("GLM fallback:", ("enabled, model=" + GLM_MODEL) if GLM_API_KEY else "not configured (Google only)")
     print("whisper model:", WHISPER_MODEL, "| max video minutes:", MAX_VIDEO_MINUTES or "unlimited")
     print("ffmpeg:", shutil.which("ffmpeg") or "MISSING")
+    print("libreoffice:", shutil.which("soffice") or "missing (ReportLab fallback will be used)")
+    print("burn subtitles:", ("on, max %d min" % BURN_MAX_MINUTES) if BURN_SUBTITLES else "off")
+    print("pdf copy:", "on" if SEND_PDF_COPY else "off")
     try:
         import yt_dlp
         print("yt-dlp:", yt_dlp.version.__version__)
@@ -1049,12 +1518,13 @@ def self_check():
 
 
 def main():
+    global _HARD_DEADLINE
     if "--check" in sys.argv:
         self_check()
         return
     if not BOT_TOKEN:
         print("BOT_TOKEN is missing — add it as a GitHub secret first.")
-        sys.exit(1)
+        sys.exit(42)
 
     state = load_state()
     save_state(state)
@@ -1062,6 +1532,7 @@ def main():
     workdir = tempfile.mkdtemp(prefix="soranibot_")
     start = time.time()
     deadline = start + RUN_SECONDS
+    _HARD_DEADLINE = deadline - 600   # ١٠ خولەک بۆ ناردنەوەی دەرئەنجامەکان حیجز بکە
 
     if state.get("offset", 0) <= 0:
         try:
@@ -1073,8 +1544,10 @@ def main():
 
     while time.time() < deadline:
         remaining = deadline - time.time()
-        updates = tg_get_updates(state.get("offset", 0), timeout=min(40, max(5, int(remaining))))
-        if not updates and (time.time() - start) > IDLE_EXIT_SECONDS:
+        updates = tg_get_updates(state.get("offset", 0),
+                                 timeout=int(min(45, max(5, remaining))))
+        if (not updates and IDLE_EXIT_SECONDS > 0
+                and (time.time() - start) > IDLE_EXIT_SECONDS):
             break
         for u in updates:
             try:
@@ -1085,6 +1558,7 @@ def main():
             save_state(state)
             log.info("processed update %s", u["update_id"])
 
+    save_state(state)
     shutil.rmtree(workdir, ignore_errors=True)
     log.info("bot cycle finished")
 
