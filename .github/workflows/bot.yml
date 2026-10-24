@@ -62,9 +62,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/apt-cache
-          key: apt-ffmpeg-libreoffice-v1
+          key: apt-ffmpeg-libreoffice-tesseract-v2
 
-      - name: Install system packages (ffmpeg + fonts + LibreOffice)
+      - name: Install system packages (ffmpeg + fonts + LibreOffice + tesseract)
         if: steps.guard.outputs.skip != 'true'
         run: |
           mkdir -p ~/apt-cache
@@ -72,8 +72,35 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
             ffmpeg fonts-noto-core libreoffice-writer libreoffice-impress \
+            tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng \
             || sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-core
           sudo cp -n /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
+
+      - name: Local Bot API server (فایل تا 2GB — بۆ ڤیدیۆی گەورەتر لە 20MB)
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          if [ -z "$TG_API_ID" ] || [ -z "$TG_API_HASH" ]; then
+            echo "TG_API_ID/TG_API_HASH not set — using official api.telegram.org (20MB download limit)"
+            exit 0
+          fi
+          docker run -d --name botapi -p 8081:8081 \
+            -e TELEGRAM_API_ID="$TG_API_ID" -e TELEGRAM_API_HASH="$TG_API_HASH" \
+            aiogram/telegram-bot-api:latest --local --http-port 8081
+          ok=0
+          for i in $(seq 1 30); do
+            sleep 1
+            if curl -s "http://localhost:8081/bot$BOT_TOKEN/getMe" | grep -q '"ok":true'; then ok=1; break; fi
+          done
+          if [ "$ok" = "1" ]; then
+            echo "TG_API_BASE=http://localhost:8081" >> "$GITHUB_ENV"
+            echo "local Bot API ready — download/upload limit now 2GB"
+          else
+            echo "::warning::local Bot API did not start — falling back to official API"
+          fi
 
       - name: Restore bot state (Telegram offset)
         if: steps.guard.outputs.skip != 'true'
@@ -113,6 +140,13 @@ jobs:
           BURN_SUBTITLES: "1"
           BURN_MAX_MINUTES: "30"
           SEND_PDF_COPY: "1"
+          OUT_VIDEO_MAX_MB: ${{ vars.OUT_VIDEO_MAX_MB || '20' }}
+          SHRINK_OVER_MB: ${{ vars.SHRINK_OVER_MB || '60' }}
+          TG_API_BASE: ${{ env.TG_API_BASE }}
+          KURDISH_TTS_API_KEY: ${{ secrets.KURDISH_TTS_API_KEY }}
+          TTS_SPEAKER_ID: ${{ vars.TTS_SPEAKER_ID }}
+          TTS_SPEED: ${{ vars.TTS_SPEED }}
+          TTS_MAX_CHARS: ${{ vars.TTS_MAX_CHARS }}
         run: |
           code=0
           python bot.py || code=$?
