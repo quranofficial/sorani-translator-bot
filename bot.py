@@ -1251,9 +1251,61 @@ def tts_clip(text):
     return data
 
 
+def _atempo_chain(ratio):
+    """زنجیرەی atempo بۆ خێراکردنی دەنگ بۆ ratio — هەر پارچەیەک ≤ 2.0،
+    کۆی گشتی سنووردارە بە ٢.٥x بۆ ئەوەی دەنگ هێشتا سروشتی بمێنێتەوە."""
+    ratio = min(max(ratio, 0.5), 2.5)
+    parts, r = [], ratio
+    while r > 2.0 + 1e-6:
+        parts.append("atempo=2.0")
+        r /= 2.0
+    parts.append("atempo=%.3f" % r)
+    return ",".join(parts)
+
+
+def _fit_voice_clip(src, gap, dst):
+    """کلیپی TTS دەگونجێنێت لە مەودای بەردەستدا (لە دەستپێکی خۆی تا دەستپێکی
+    پارچەی داهاتوو) — بۆ هاوکاتی دروست لەگەڵ ڤیدیۆ:
+    - ئەگەر کلیپەکە درێژتر بوو لە مەوداکە، بە atempo خێرا دەکرێت (تا ٢.٥x)
+    - ئەگەر هێشتا درێژ بوو، لە کۆتایی مەوداکە دەبڕدرێت بە fadeout
+    دەنگ ٤٤.١کHZ ستێریۆ دەگەڕێنرێتەوە بۆ یەکخستنی پاک."""
+    d = ffprobe_duration(src)
+    filters = []
+    if gap and gap >= 0.6 and d > gap:
+        eff = gap - 0.15                       # پاشگەزبەندی بچووک پێش پارچەی داهاتوو
+        ratio = d / max(eff, 0.5)
+        filters.append(_atempo_chain(ratio))
+        nd = d / min(ratio, 2.5)
+        if nd > eff + 0.02:                    # هێشتا درێژە — دەبڕین بە fadeout
+            filters.append("atrim=0:%.3f" % eff)
+            f0 = max(0.0, eff - 0.30)
+            filters.append("afade=t=out:st=%.3f:d=%.3f" % (f0, eff - f0))
+    elif gap and 0 < gap < 0.6 and d > gap:
+        filters.append("atrim=0:%.3f" % max(0.3, gap - 0.05))
+        filters.append("afade=t=out:st=0:d=0.15")
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src,
+           "-af", ",".join(filters) if filters else "anull",
+           "-ac", "2", "-ar", "44100", dst]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=300)
+    except Exception as e:
+        log.warning("fit voice clip error: %s", e)
+        return False
+    if res.returncode != 0 or not os.path.exists(dst) or os.path.getsize(dst) == 0:
+        log.warning("fit voice clip failed: %s", (res.stderr or "")[-300:])
+        return False
+    return True
+
+
 def build_kurdish_voice_track(cues, texts, total_dur, workdir, workers=3):
-    """تراکێکی دەنگی سۆرانی لە ژێرنووسە وەرگێڕدراوەکان دروست دەکات،
-    هەر پارچەیەک لە کاتی خۆی دادەنرێت (adelay + amix). ئەگەر هیچ کلیپێک نەبوو None."""
+    """تراکێکی دەنگی سۆرانی لە ژێرنووسە وەرگێڕدراوەکان دروست دەکات.
+
+    **هاوکاتی تەواو لەگەڵ ڤیدیۆ:** هەر پارچەیەک ڕێک لە چرکەی ژێرنووسەکەی خۆی
+    دەست پێدەکات (adelay بە پانتایی چرکە) — واتە ئەگەر لە چرکەی ٢٠ وشەیەک لە
+    ڤیدیۆکە بوترێت، وەرگێڕانە کوردییەکەشی لە هەمان چرکە دەست پێدەکات.
+    ئەگەر پارچەیەک درێژتر بوو لە مەودای بەردەست (تا دەستپێکی پارچەی داهاتوو)،
+    خۆکارانە خێراتر دەکرێت (تا ٢.٥x) یان دەبڕدرێت — هەرگیز لەسەر یەک ناکەون.
+    ئەگەر هیچ کلیپێک نەبوو None."""
     if not shutil.which("ffmpeg"):
         raise BotError(ERR_FFMPEG)
     tdir = tempfile.mkdtemp(prefix="tts_", dir=workdir)
@@ -1294,6 +1346,21 @@ def build_kurdish_voice_track(cues, texts, total_dur, workdir, workers=3):
     clips.sort(key=lambda x: x[0])
 
     total = max(float(total_dur or 0), clips[-1][0] + 2.0) + 1.0
+    # ---- گونجاندنی هەر کلیپێک لە مەودای خۆیدا (sync + بێ لەسەریەککەوتن) ----
+    fitted = []
+    for n, (st, p) in enumerate(clips):
+        if n + 1 < len(clips):
+            gap = max(0.3, clips[n + 1][0] - st)
+        else:
+            gap = max(2.0, total - 0.5 - st)
+        fw = os.path.join(tdir, "f%04d.wav" % n)
+        if _fit_voice_clip(p, gap, fw):
+            fitted.append((st, fw))
+        else:
+            fitted.append((st, p))          # پاشەکەوت: فایلی ڕەسەن بەکاردەهێنرێت
+    if not fitted:
+        return None
+
     sil = os.path.join(tdir, "sil.wav")
     try:
         res = subprocess.run(
@@ -1304,13 +1371,14 @@ def build_kurdish_voice_track(cues, texts, total_dur, workdir, workers=3):
             return None
         inputs = ["-i", sil]
         parts, mix = [], "[0:a]"
-        for idx, (st, p) in enumerate(clips, 1):
+        for idx, (st, p) in enumerate(fitted, 1):
             inputs += ["-i", p]
             d = int(st * 1000)
-            parts.append("[%d:a]aresample=44100,adelay=%d|%d[a%d]" % (idx, d, d, idx))
+            parts.append("[%d:a]aresample=44100,adelay=%d:all=1[a%d]"
+                         % (idx, d, idx))
             mix += "[a%d]" % idx
         parts.append("%samix=inputs=%d:duration=first:normalize=0[out]"
-                     % (mix, len(clips) + 1))
+                     % (mix, len(fitted) + 1))
         out = os.path.join(tdir, "voice.wav")
         res = subprocess.run(
             ["ffmpeg", "-y", "-loglevel", "error"] + inputs +
@@ -1320,7 +1388,8 @@ def build_kurdish_voice_track(cues, texts, total_dur, workdir, workers=3):
         if res.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
             log.warning("voice track failed: %s", (res.stderr or "")[-400:])
             return None
-        log.info("voice track built: %d clips, %.1fs", len(clips), total)
+        log.info("voice track built: %d clips, %.1fs (synced to cue starts)",
+                 len(fitted), total)
         return out
     except Exception as e:
         log.warning("voice track error: %s", e)
