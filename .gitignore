@@ -1,0 +1,10 @@
+state.json
+state.json.tmp
+__pycache__/
+*.py[cod]
+*.wav
+*.mp4
+*.m4a
+.env
+.venv/
+venv/
