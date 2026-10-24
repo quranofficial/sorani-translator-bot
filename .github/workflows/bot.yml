@@ -89,9 +89,13 @@ jobs:
           fi
           mkdir -p "$GITHUB_WORKSPACE/tgdata"
           sudo chmod 777 "$GITHUB_WORKSPACE/tgdata"
+          # گرنگ: وێنە نوێیەکەی aiogram/telegram-bot-api پارامەترەکانی دێڕی فەرمان
+          # (وەکو --local) پشتگوێ دەخات — تەنها env دەناسێت. TELEGRAM_LOCAL=1
+          # فایلەکان دەکاتە ٢GB؛ بەبێ ئەوە getFile بۆ فایلی >20MB «file is too big» دەدات.
           docker run -d --name botapi -p 8081:8081 \
             -v "$GITHUB_WORKSPACE/tgdata:/var/lib/telegram-bot-api" \
             -e TELEGRAM_API_ID="$TG_API_ID" -e TELEGRAM_API_HASH="$TG_API_HASH" \
+            -e TELEGRAM_LOCAL=1 -e TELEGRAM_HTTP_PORT=8081 \
             aiogram/telegram-bot-api:latest --local --http-port 8081
           ok=0
           for i in $(seq 1 30); do
@@ -99,6 +103,9 @@ jobs:
             if curl -s "http://localhost:8081/bot$BOT_TOKEN/getMe" | grep -q '"ok":true'; then ok=1; break; fi
           done
           if [ "$ok" = "1" ]; then
+            if ! docker logs botapi 2>&1 | grep -q -- "--local"; then
+              echo "::warning::telegram-bot-api is NOT running in --local mode! Files >20MB will fail. Check TELEGRAM_LOCAL env."
+            fi
             echo "TG_API_BASE=http://localhost:8081" >> "$GITHUB_ENV"
             echo "TG_DATA_DIR=$GITHUB_WORKSPACE/tgdata" >> "$GITHUB_ENV"
             echo "local Bot API ready — download/upload limit now 2GB (files read directly from disk)"
