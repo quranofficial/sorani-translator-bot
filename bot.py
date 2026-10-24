@@ -49,6 +49,8 @@ STATE_FILE        = (os.getenv("STATE_FILE") or "state.json").strip()
 # خاڵی Telegram: ئەگەر سێرڤەری ناوخۆیی Bot API کاردەکات (docker)، فایل تا 2GB دابەردەکرێت
 TG_BASE           = (os.getenv("TG_API_BASE") or "https://api.telegram.org").strip().rstrip("/")
 TG_FILE_BASE      = (os.getenv("TG_FILE_BASE") or TG_BASE).strip().rstrip("/")
+TG_CLOUD_BASE     = "https://api.telegram.org"          # پاشەکەوتی فەرمی — بۆ فایلی ≤ ٢٠MB
+TG_DATA_DIR       = (os.getenv("TG_DATA_DIR") or "").strip()  # فۆڵدەری داتای سێرڤەری ناوخۆیی لەسەر ڕەسەن (mount)
 LOCAL_BOT_API     = ("localhost" in TG_BASE) or ("127.0.0.1" in TG_BASE)
 RUN_SECONDS       = env_int("RUN_SECONDS", 2700)     # ماوەی خولی polling (بنەڕەت ٤٥ خولەک)
 IDLE_EXIT_SECONDS = env_int("IDLE_EXIT_SECONDS", 0)  # 0 = لەکارخراو — بۆت تا کۆتایی خول ئۆنلاین دەمێنێت
@@ -214,8 +216,9 @@ def ts(sec):
 
 # ----------------------------- Telegram ------------------------------
 
-def tg_call(method, payload=None, files=None, timeout=70):
-    r = SESSION.post(TG_API + "/" + method, data=payload, files=files, timeout=timeout)
+def tg_call(method, payload=None, files=None, timeout=70, api_base=None):
+    r = SESSION.post((api_base or TG_API) + "/" + method,
+                     data=payload, files=files, timeout=timeout)
     try:
         j = r.json()
     except Exception:
@@ -265,18 +268,110 @@ def tg_send_doc(chat_id, path, caption=None):
                 files={"document": (os.path.basename(path), fh)}, timeout=600)
 
 
+def _local_file_candidates(f):
+    """لە دۆخی --local سێرڤەری Bot API فایلەکە لەسەر دیسک دادەگرێت — چارەسەری
+    کێشەی ناسراوی tdlib #742: HTTP endpoint ی فایل هەندێجار 404 دەداتەوە
+    تەنانەت کاتێک getFile ڕێگای دروست دەداتەوە. لێرە ڕێڕەوە ئەگومانییەکان
+    لەسەر دیسکی ڕەسەن (mount ی tgdata) دەدۆزرێنەوە."""
+    if not TG_DATA_DIR:
+        return []
+    fp = (f.get("file_path") or "").strip()
+    if not fp:
+        return []
+    root = os.path.abspath(TG_DATA_DIR)
+    cands = []
+    if fp.startswith("/"):
+        # ڕێڕەوی ڕەها: /var/lib/telegram-bot-api/<تۆکن>/documents/file_0.mp4
+        for pref in ("/var/lib/telegram-bot-api/", "/var/lib/telegram-bot-api"):
+            if fp.startswith(pref):
+                cands.append(os.path.join(root, fp[len(pref):].lstrip("/")))
+        cands.append(fp)                                  # ئەگەر هەمان هۆستە
+        cands.append(os.path.join(root, fp.lstrip("/")))  # mapping ی سادە
+    else:
+        # ڕێڕەوی بەڕێژە: documents/file_0.mp4 → <tgdata>/<تۆکن>/documents/... یان <tgdata>/documents/...
+        cands.append(os.path.join(root, BOT_TOKEN, fp))
+        cands.append(os.path.join(root, fp))
+    out, seen = [], set()
+    for c in cands:
+        c = os.path.abspath(c)
+        if c not in seen:
+            seen.add(c)
+            out.append(c)
+    return out
+
+
+def _download_to(url, path, timeout=600):
+    """داگرتن بە stream — بۆ فایلی گەورە (تا ٢GB) بێ خواردنی RAM."""
+    with SESSION.get(url, timeout=timeout, stream=True) as r:
+        if r.status_code == 404:
+            return False
+        r.raise_for_status()
+        with open(path, "wb") as fh:
+            for chunk in r.iter_content(chunk_size=1024 * 1024):
+                if chunk:
+                    fh.write(chunk)
+    return os.path.getsize(path) > 0
+
+
 def tg_download(file_id, workdir, name_hint="file"):
     f = tg_call("getFile", {"file_id": file_id}, timeout=60)
-    if int(f.get("file_size") or 0) > TG_MAX_FILE:
+    size = int(f.get("file_size") or 0)
+    if size > TG_MAX_FILE:
         raise BotError(err_big())
-    url = "%s/file/bot%s/%s" % (TG_FILE_BASE, BOT_TOKEN, f["file_path"])
-    r = SESSION.get(url, timeout=600)
-    r.raise_for_status()
     ext = os.path.splitext(f.get("file_path") or "")[1] or ""
     path = os.path.join(workdir, sanitize(name_hint) + ext)
-    with open(path, "wb") as fh:
-        fh.write(r.content)
-    return path
+
+    # ---- ١) خوێندنەوەی ڕاستەوخۆ لە دیسک (mount ی tgdata) — خێراترین و پتەوترین ڕێگا ----
+    for cand in _local_file_candidates(f):
+        try:
+            if os.path.isfile(cand) and os.path.getsize(cand) > 0:
+                shutil.copyfile(cand, path)
+                log.info("downloaded via local disk: %s (%.1f MB)",
+                         cand, os.path.getsize(cand) / 1e6)
+                return path
+        except OSError as e:
+            log.warning("local-disk read failed for %s: %s", cand, e)
+
+    # ---- ٢) داگرتن لە ڕێگەی HTTP — لەگەڵ دووبارەکردنەوە بۆ 404 (getFile ی نوێ هەر جارە) ----
+    last_err = None
+    for attempt in range(3):
+        if attempt:
+            time.sleep(2 * attempt)
+            try:
+                f = tg_call("getFile", {"file_id": file_id}, timeout=60) or f
+            except Exception as e:
+                log.warning("getFile retry %d failed: %s", attempt + 1, e)
+        fp = f.get("file_path")
+        if not fp:
+            continue
+        url = "%s/file/bot%s/%s" % (TG_FILE_BASE, BOT_TOKEN, fp.lstrip("/"))
+        try:
+            if _download_to(url, path):
+                return path
+            last_err = "404 Not Found: %s" % url
+            log.warning("file HTTP 404 (attempt %d/3)", attempt + 1)
+        except requests.RequestException as e:
+            last_err = str(e)
+            log.warning("download attempt %d failed: %s", attempt + 1, e)
+
+    # ---- ٣) پاشەکەوتی فەرمی (api.telegram.org) بۆ فایلی ≤ ٢٠MB — ڕێگای فایل لە کڵاود جیاوازە ----
+    if size <= 20 * 1024 * 1024:
+        try:
+            f2 = tg_call("getFile", {"file_id": file_id}, timeout=60,
+                         api_base=TG_CLOUD_BASE)
+            fp2 = (f2 or {}).get("file_path")
+            if fp2 and _download_to("%s/file/bot%s/%s" % (TG_CLOUD_BASE, BOT_TOKEN,
+                                                          fp2.lstrip("/")), path):
+                log.info("downloaded via official API fallback (%.1f MB)", size / 1e6)
+                return path
+        except Exception as e:
+            log.warning("official API fallback failed: %s", e)
+
+    # ---- ٤) هەموو ڕێگاکان سەرنەچوون ----
+    raise BotError("داگرتنی فایل سەرنەچوو لە سێرڤەری ناوخۆیی Bot API (404). "
+                   "تکایە دووبارە فایلەکە بنێرەوە — ئەگەر دووبارە ڕوویدا، فایلی "
+                   "bot.yml ی نوێ باربکە (mount ی tgdata بۆ چارەسەری کێشەی "
+                   "telegram-bot-api #742).")
 
 
 def tg_get_updates(offset, timeout=40):
