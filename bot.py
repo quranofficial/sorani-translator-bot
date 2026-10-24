@@ -81,6 +81,11 @@ GLM_MODELS        = ([_glm_model_env] if _glm_model_env else []) + [
 _glm_seen = set()
 GLM_MODELS = [m for m in GLM_MODELS if m and not (m in _glm_seen or _glm_seen.add(m))]
 YT_COOKIES        = (os.getenv("YT_COOKIES") or "").strip()
+# زنجیرەی کلیێنتەکانی yt-dlp — یەکەم دانەی سەرکەوتوو بەکار دەهێنرێت.
+# android_vr / tv / web_embedded پێویستیان بە PO Token نییە — لە ئایپییەکانی
+# داتاسێنتەر (وەکو GitHub Actions) زۆر جار تەنها ئەمانە لە یووتیوب دەپەڕن.
+YT_CLIENTS = [c.strip() for c in (os.getenv("YT_CLIENTS") or
+              "default,android_vr,web_safari,tv,web_embedded").split(",") if c.strip()]
 # --- دەنگی کوردی سۆرانی (TTS) — kurdishtts.com ---
 TTS_API_KEY   = (os.getenv("KURDISH_TTS_API_KEY") or os.getenv("TTS_API_KEY") or "").strip()
 TTS_API_URL   = (os.getenv("KURDISH_TTS_API_URL") or "https://www.kurdishtts.com/api/tts-proxy").strip()
@@ -121,8 +126,9 @@ WELCOME = (
     "  /voice_off بۆ ناچالاککردن — /voice بۆ زانینی دۆخ.\n"
     "\n"
     "تێبینی گرنگ:\n"
-    "• فایلی ڕاستەوخۆ دەبێت کەمتر بێت لە ٢٠ مێگابایت (سنووری تەلەگرام).\n"
-    "• بەردەوام ئۆنلاینم (٢٤ کاتژمێر / ٧ ڕۆژ)؛ تەنها لە کاتی گۆڕینی خولەکە (هەر نزیکەی کاتژمێرێک)\n"
+    + ("• فایلی ڕاستەوخۆ دەبێت کەمتر بێت لە ٢٠ مێگابایت (سنووری تەلەگرام).\n" if not LOCAL_BOT_API else
+       "• فایلەکان تا ٢ گێگابایت قبوڵ دەکرێن — خۆکارانە بچووکی دەکەمەوە.\n")
+    + "• بەردەوام ئۆنلاینم (٢٤ کاتژمێر / ٧ ڕۆژ)؛ تەنها لە کاتی گۆڕینی خولەکە (هەر نزیکەی کاتژمێرێک)\n"
     "  لەوانەیە وەڵامەکەم چەند خولەکێک دابخرێت."
 )
 
@@ -163,9 +169,42 @@ MSG_QUEUED      = ("داواکارییەکەتان وەرگیرا — ئێستا
                    "خۆکارانە دوای تەواوبوونیان دەست پێدەکات و وەڵامەکان بە ڕیز بۆتان دەنێردرێتەوە.")
 MSG_QUEUE_FULL  = ("بەداخەوە ڕیزەکە پڕە ({n} داواکاری لە چاوەڕوانیدان).\n"
                    "تکایە دوای ٣ تا ٥ خولەک دووبارە داواکارییەکە بنێرەوە.")
-ERR_LINK        = ("نەتوانم ڤیدیۆکە لەم لینکە دابگرم. لەوانەیە ماڵپەڕەکە ڕێگری لە سێرڤەرەکان بکات "
-                   "(بەتایبەتی YouTube لە ئایپییەکانی GitHub).\n"
-                   "چارەسەر: دووبارە هەوڵ بدە، یان ڤیدیۆکە دابگرە و وەکو فایل بنێرە (تا ٢٠ مێگابایت).")
+def err_link(cause=""):
+    """پەیامی شکانی داگرتنی لینک — بەپێی هۆکارەکە دەگۆڕێت."""
+    lim = "٢ گێگابایت" if LOCAL_BOT_API else "٢٠ مێگابایت"
+    msg = ("نەتوانم ڤیدیۆکە لەم لینکە دابگرم. لەوانەیە ماڵپەڕەکە ڕێگری لە سێرڤەرەکان بکات.\n"
+           "چارەسەر: دووبارە هەوڵ بدە (چەند ڕێگای جیاواز خۆکارانە تاقی دەکرێنەوە)، "
+           "یان ڤیدیۆکە دابگرە و وەکو فایل بنێرە (تا %s)." % lim)
+    c = (cause or "").lower()
+    if "sign in to confirm" in c or "not a bot" in c:
+        msg += ("\n\nهۆکار: یووتیوب پشکنینی مرۆیی لە سێرڤەرەکانی GitHub دەکات.\n"
+                "چارەسەری تەواو: cookies ی یووتیوب بەرهەم بهێنە (بە شێوازی Netscape) و "
+                "وەکو secret بە ناوی YT_COOKIES زیاد بکە — بینی README.")
+    elif "confirm your age" in c or "age" in c and ("restrict" in c or "inappropriate" in c):
+        msg += ("\n\nهۆکار: ڤیدیۆکە سنووری تەمەنی هەیە — تەنها بە cookies ی هەژماری یووتیوب دادەگیرێت "
+                "(secret ی YT_COOKIES).")
+    elif "private video" in c or "this video is private" in c:
+        msg += "\n\nهۆکار: ڤیدیۆکە تایبەتە (Private) — داگرتنی بۆ هەموو کەسان قەدەغەیە."
+    elif "unavailable" in c or "removed" in c or "terminated" in c:
+        msg += "\n\nهۆکار: ڤیدیۆکە سڕاوەتەوە یان بەردەست نییە."
+    elif "available in your country" in c or ("geo" in c and ("block" in c or "restrict" in c)):
+        msg += "\n\nهۆکار: ڤیدیۆکە لە وڵاتی سێرڤەرەکە قەدەغەیە (Geo-block)."
+    elif "is live" in c or "live event" in c or "premiere" in c:
+        msg += "\n\nهۆکار: ئەمە پەخشی ڕاستەوخۆیە — تەنها دوای تەواوبوونی دادەگیرێت."
+    elif "unsupported url" in c:
+        msg += "\n\nهۆکار: ئەم ماڵپەڕە پشتگیری نەکراوە — لینکی یووتیوب / TikTok / Facebook بنێرە."
+    elif "429" in c or "too many requests" in c:
+        msg += "\n\nهۆکار: زۆر داواکاری نێردراوە (Rate limit) — دوای چەند خولەکێک دووبارەی بکەوە."
+    elif "403" in c or "forbidden" in c:
+        msg += "\n\nهۆکار: ماڵپەڕەکە داواکارییەکەی ڕەت کردەوە — دووبارە هەوڵ بدە."
+    return msg
+
+
+def err_too_long():
+    """پەیامی ڤیدیۆی درێژتر لە MAX_VIDEO_MINUTES."""
+    return ("ڤیدیۆکە لە سنوورەکە درێژترە (زۆرترین: %d خولەک — MAX_VIDEO_MINUTES).\n"
+            "تکایە بەشی بچووکتر بنێرە یان سنوورەکە لە GitHub بگۆڕە."
+            % MAX_VIDEO_MINUTES)
 def err_big():
     """پەیامی فایلی گەورە — بەپێی جۆری خاڵی Telegram."""
     if LOCAL_BOT_API:
@@ -2140,10 +2179,10 @@ def build_transcript_docx(cues, texts, out_path, title=""):
     doc.save(out_path)
 
 
-def ytdl_download(url, workdir):
+def _ytdl_base_opts(workdir):
+    """ئۆپشنە بنەڕەتییەکانی yt-dlp — بۆ هەموو هەوڵەکان."""
     import yt_dlp
     import yt_dlp.utils
-
     opts = {
         "format": ("best[height<=720]+bestaudio/best[height<=720]/bestaudio/best"
                    if BURN_SUBTITLES else "bestaudio/best"),  # ڤیدیۆ پێویستە بۆ ژێرنووس
@@ -2163,7 +2202,12 @@ def ytdl_download(url, workdir):
         with open(cf, "w", encoding="utf-8") as fh:
             fh.write(YT_COOKIES + "\n")
         opts["cookiefile"] = cf
+    return opts
 
+
+def _ytdl_extract(url, workdir, opts):
+    """یەک هەوڵی داگرتن — (path, title, duration) دەگەڕێنێتەوە."""
+    import yt_dlp
     with yt_dlp.YoutubeDL(opts) as ydl:
         info = ydl.extract_info(url, download=True)
         if info.get("_type") == "playlist" and info.get("entries"):
@@ -2178,11 +2222,42 @@ def ytdl_download(url, workdir):
         if not os.path.exists(path):
             g = sorted(glob.glob(os.path.join(workdir, "src.*")))
             if not g:
+                # ڕەنگە match_filter ڤیدیۆکەی ڕەت کردبێتەوە (زۆر درێژە)
+                dur = info.get("duration") or 0
+                if MAX_VIDEO_MINUTES > 0 and dur > MAX_VIDEO_MINUTES * 60:
+                    raise BotError(err_too_long())
                 raise RuntimeError("downloaded file not found")
             path = g[-1]
         title = info.get("title") or "video"
         duration = info.get("duration") or 0
     return path, title, duration
+
+
+def ytdl_download(url, workdir):
+    """داگرتنی ڤیدیۆ لە لینک — بە چەند کلیێنتی جیاواز هەوڵ دەدرێت.
+    یووتیوب لە ئایپییەکانی GitHub زۆر جار کلیێنتی بنەڕەتی ڕەت دەکاتەوە
+    («Sign in to confirm you're not a bot») — بەڵام کلیێنتی android_vr /
+    tv / web_embedded (بێ PO Token) زۆر جار دەپەڕن. یەکەم دانەی سەرکەوتوو."""
+    errors = []
+    for i, client in enumerate(YT_CLIENTS):
+        opts = dict(_ytdl_base_opts(workdir))
+        if client and client != "default":
+            opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+        try:
+            out = _ytdl_extract(url, workdir, opts)
+            if i > 0 or client != "default":
+                log.info("yt-dlp: success with client '%s' for %s", client, url)
+            return out
+        except BotError:
+            raise                      # هەڵەی دۆستانە (وەکو ڤیدیۆی درێژ) — دووبارەی نەکەوە
+        except Exception as e:
+            err = str(e) or repr(e)
+            errors.append("[%s] %s" % (client, err.splitlines()[0][:220] if err else err))
+            log.warning("yt-dlp [%s] failed for %s: %s", client, url,
+                        err.splitlines()[0][:300] if err else err)
+            if i < len(YT_CLIENTS) - 1:
+                time.sleep(1.0)        # کەمێک چاوەڕێ بکە — نەک لە یەک چرکەدا چەند داواکاری
+    raise BotError(err_link(" | ".join(errors)))
 
 
 def run_speech_pipeline(src_path, chat, workdir, state=None):
@@ -2441,8 +2516,8 @@ def handle_link(url, chat, workdir, state=None):
     except BotError:
         raise
     except Exception as e:
-        log.warning("yt-dlp failed for %s: %s", url, e)
-        raise BotError(ERR_LINK)
+        log.warning("link handling failed for %s: %s", url, e)
+        raise BotError(err_link(str(e)))
     msg = "داگیرا: %s" % title[:120]
     if duration:
         msg += "\nماوە: %s" % fmt_dur(duration)
@@ -2653,6 +2728,7 @@ def self_check():
     try:
         import yt_dlp
         print("yt-dlp:", yt_dlp.version.__version__)
+        print("yt clients:", " -> ".join(YT_CLIENTS), "| cookies:", "yes" if YT_COOKIES else "no")
     except Exception as e:
         print("yt-dlp: FAIL", e)
     try:
