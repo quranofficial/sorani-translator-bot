@@ -1,0 +1,82 @@
+# =====================================================================
+#  بۆتی وەرگێڕی کوردی سۆرانی — خولی GitHub Actions
+#  هەر ٥ خولەک بۆتەکە چێکی پەیامە نوێیەکان دەکات و دواتر ڕادەوەستێت.
+# =====================================================================
+
+name: Sorani Translator Bot
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"     # هەر ٥ خولەک (کاتی UTC)
+  workflow_dispatch: {}        # بۆ کارپێکردنی دەستی (یەکەم جار)
+
+permissions:
+  contents: read
+
+concurrency:
+  group: sorani-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install ffmpeg and Arabic fonts
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-core
+
+      - name: Restore bot state (Telegram offset)
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: bot-state-${{ github.run_number }}
+          restore-keys: |
+            bot-state-
+
+      - name: Restore whisper models
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-whisper-${{ runner.os }}-${{ github.run_number }}
+          restore-keys: |
+            hf-whisper-${{ runner.os }}-
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run bot (polling cycle)
+        env:
+          PYTHONUNBUFFERED: "1"
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GLM_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+          WHISPER_MODEL: ${{ vars.WHISPER_MODEL }}
+          MAX_VIDEO_MINUTES: ${{ vars.MAX_VIDEO_MINUTES }}
+          RUN_SECONDS: "240"
+          HEAVY_BUDGET: "1500"
+        run: python bot.py
+
+      - name: Save bot state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: bot-state-${{ github.run_number }}
+
+      - name: Save whisper models
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-whisper-${{ runner.os }}-${{ github.run_number }}
