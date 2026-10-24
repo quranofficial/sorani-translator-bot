@@ -46,6 +46,10 @@ def env_int(name, default):
 BOT_TOKEN         = (os.getenv("BOT_TOKEN") or "").strip()
 TARGET_LANG       = (os.getenv("TARGET_LANG") or "ckb").strip()      # ckb = کوردی سۆرانی
 STATE_FILE        = (os.getenv("STATE_FILE") or "state.json").strip()
+# خاڵی Telegram: ئەگەر سێرڤەری ناوخۆیی Bot API کاردەکات (docker)، فایل تا 2GB دابەردەکرێت
+TG_BASE           = (os.getenv("TG_API_BASE") or "https://api.telegram.org").strip().rstrip("/")
+TG_FILE_BASE      = (os.getenv("TG_FILE_BASE") or TG_BASE).strip().rstrip("/")
+LOCAL_BOT_API     = ("localhost" in TG_BASE) or ("127.0.0.1" in TG_BASE)
 RUN_SECONDS       = env_int("RUN_SECONDS", 2700)     # ماوەی خولی polling (بنەڕەت ٤٥ خولەک)
 IDLE_EXIT_SECONDS = env_int("IDLE_EXIT_SECONDS", 0)  # 0 = لەکارخراو — بۆت تا کۆتایی خول ئۆنلاین دەمێنێت
 HEAVY_BUDGET      = env_int("HEAVY_BUDGET", 2400)    # زۆرترین کات بۆ یەک ڤیدیۆ/دەنگ (چرکە)
@@ -53,15 +57,30 @@ MAX_VIDEO_MINUTES = env_int("MAX_VIDEO_MINUTES", 0)  # 0 = بێ سنوور
 BURN_SUBTITLES    = env_int("BURN_SUBTITLES", 1)     # 1 = ژێرنووسی کوردی لەسەر ڤیدیۆ دادەنرێت
 BURN_MAX_MINUTES  = env_int("BURN_MAX_MINUTES", 30)  # زۆرترین درێژی ڤیدیۆ بۆ سووتاندنی ژێرنووس
 SEND_PDF_COPY     = env_int("SEND_PDF_COPY", 1)      # 1 = کۆپی PDF بۆ هەموو فایلەکان دەنێردرێت
+OUT_VIDEO_MAX_MB  = env_int("OUT_VIDEO_MAX_MB", 20)  # ڤیدیۆی دەرچوو خۆکارانە بۆ خوار ئەم قەبارە بچووک دەکرێتەوە
+SHRINK_OVER_MB    = env_int("SHRINK_OVER_MB", 60)    # ڤیدیۆی گەورەتر لەمە پێش پرۆسێسکردن بۆ 720p بچووک دەکرێتەوە
 WHISPER_MODEL     = (os.getenv("WHISPER_MODEL") or "base").strip()
 SOURCE_LANG       = (os.getenv("SOURCE_LANG") or "").strip() or None  # None = خۆکار
 GLM_API_KEY       = (os.getenv("GLM_API_KEY") or os.getenv("ZAI_API_KEY") or "").strip()
 GLM_API_URL       = (os.getenv("GLM_API_URL") or "https://api.z.ai/api/paas/v4").strip().rstrip("/")
-GLM_MODEL         = (os.getenv("GLM_MODEL") or "glm-4-flash").strip()
+# زنجیرەی مۆدێلەکانی GLM: یەکەم دانەی کارا لەبەر دەکرێت (glm-4.5-flash خۆڕاییە)
+_glm_model_env    = (os.getenv("GLM_MODEL") or "").strip()
+GLM_MODELS        = ([_glm_model_env] if _glm_model_env else []) + [
+    m.strip() for m in (os.getenv("GLM_MODELS") or
+                        "glm-4.5-flash,glm-4-flash,glm-4.5-air").split(",") if m.strip()]
+_glm_seen = set()
+GLM_MODELS = [m for m in GLM_MODELS if m and not (m in _glm_seen or _glm_seen.add(m))]
 YT_COOKIES        = (os.getenv("YT_COOKIES") or "").strip()
+# --- دەنگی کوردی سۆرانی (TTS) — kurdishtts.com ---
+TTS_API_KEY   = (os.getenv("KURDISH_TTS_API_KEY") or os.getenv("TTS_API_KEY") or "").strip()
+TTS_API_URL   = (os.getenv("KURDISH_TTS_API_URL") or "https://www.kurdishtts.com/api/tts-proxy").strip()
+TTS_SPEAKER   = (os.getenv("TTS_SPEAKER_ID") or "sorani_85").strip()   # خۆڕایی: sorani_85 / sorani_214
+TTS_MODEL_V   = (os.getenv("TTS_MODEL_VERSION") or "v3").strip()
+TTS_SPEED     = float((os.getenv("TTS_SPEED") or "1.0").strip() or "1.0")
+TTS_MAX_CHARS = env_int("TTS_MAX_CHARS", 15000)  # سەقەتی پیت بۆ هەر ڤیدیۆیەک (پلانی خۆڕایی: 20000/مانگ)
 
-TG_MAX_FILE = 20 * 1024 * 1024
-TG_API = "https://api.telegram.org/bot" + BOT_TOKEN
+TG_API = TG_BASE + "/bot" + BOT_TOKEN
+TG_MAX_FILE = (2000 if LOCAL_BOT_API else 20) * 1024 * 1024
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 log = logging.getLogger("sorani-bot")
@@ -85,6 +104,9 @@ WELCOME = (
     "  دەنێرمەوە + کۆپی PDF یش لەگەڵ دەکەم.\n"
     "• ڤیدیۆ یان دەنگ بنێری (فایل)، یان لینکی YouTube / Facebook / TikTok — دەنگەکە دەخوێنمەوە،\n"
     "  وەریدەگێڕم و بە فایلی SRT و Word و PDF دەینێرم + ژێرنووسی کوردی لەسەر ڤیدیۆکە دادەنێم.\n"
+    "• ئەگەر ڤیدیۆکە لە ٢٠ مێگابایت گەورەتر بوو، بۆ خوار ٢٠ مێگابایت بچووکی دەکەمەوە.\n"
+    "• دەنگی کوردی سۆرانی لەسەر ڤیدیۆ (ئارەزوومەندانە): /voice_on بۆ چالاککردن،\n"
+    "  /voice_off بۆ ناچالاککردن — /voice بۆ زانینی دۆخ.\n"
     "\n"
     "تێبینی گرنگ:\n"
     "• فایلی ڕاستەوخۆ دەبێت کەمتر بێت لە ٢٠ مێگابایت (سنووری تەلەگرام).\n"
@@ -108,6 +130,19 @@ MSG_BURN_SKIPPED = ("ڤیدیۆکە لە {max} خولەک درێژترە، بۆ�
                     "(سنووری کاتی GitHub Actions).\n"
                     "فایلی SRT ئامادەیە — دەتوانیت بە بەرنامەی مۆنتاژ یان خزمەتگوزاری "
                     "کاپشن بیخەیتە سەر ڤیدیۆکە.")
+MSG_TRANS_PARTIAL = "تێبینی: {n} بەش وەرگێڕانەکەیان سەرنەچوو و بە زمانی ڕەسەن ماونەتەوە."
+MSG_COMPRESS = ("قەبارەی ڤیدیۆکە لە {mb} مێگابایت زیاترە — بۆ ناردنەوە بچووکی دەکەمەوە "
+                "بۆ خوار {mb} مێگابایت... (چەند خولەکێک دەخایەنێت)")
+MSG_ORIG_TRANSCRIPT = "نووسینی ڕەسەن (بەبێ وەرگێڕان) — دووبارە هەوڵ بدە بۆ وەرگێڕان."
+MSG_VOICE_ON = "دەنگی کوردی سۆرانی چالاک کرا — لە ڤیدیۆی داهاتوودا دەنگە کوردییەکە لەسەر ڤیدیۆ دادەنێم."
+MSG_VOICE_OFF = "دەنگی کوردی ناچالاک کرا — ڤیدیۆکان بە دەنگی ڕەسەنی خۆیان دەنێردرێنەوە."
+MSG_VOICE_STATUS_ON = "ئێستا: دەنگی کوردی چالاکە (/voice_off بۆ ناچالاککردن)"
+MSG_VOICE_STATUS_OFF = "ئێستا: دەنگی کوردی ناچالاکە (/voice_on بۆ چالاککردن)"
+MSG_TTS_START = "ئێستا دەنگی کوردی سۆرانی بۆ ڤیدیۆکە دروست دەکەم... (چەند خولەکێک دەخایەنێت)"
+MSG_TTS_FAIL = "دروستکردنی دەنگی کوردی سەرنەچوو — ڤیدیۆکە بە دەنگی ڕەسەن نێردرایەوە."
+MSG_TTS_NOKEY = ("بۆ دەنگی کوردی سۆرانی: کلیدێکی TTS لە kurdishtts.com/settings/api بەدەست بهێنە\n"
+                 "و لە GitHub بیکە بە secret بە ناوی KURDISH_TTS_API_KEY.\n"
+                 "(پلانی خۆڕایی: ٢٠٠٠٠ پیت بۆ مانگێک — دەنگی بنەڕەت: sorani_85)")
 MSG_UNSUPPORTED = ("ئەم جۆرە پەیام/فایلە پشتگیری نەکراوە.\n"
                    "پشتگیریکراو: PDF، Word (docx)، PowerPoint (pptx)، TXT، SRT، "
                    "ڤیدیۆ، دەنگ، لینکی ڤیدیۆ، یان دەقی ئاسایی.")
@@ -115,13 +150,25 @@ MSG_ALREADY     = "ئەم دەقە پێشتر سۆرانییە یان پێویس
 ERR_LINK        = ("نەتوانم ڤیدیۆکە لەم لینکە دابگرم. لەوانەیە ماڵپەڕەکە ڕێگری لە سێرڤەرەکان بکات "
                    "(بەتایبەتی YouTube لە ئایپییەکانی GitHub).\n"
                    "چارەسەر: دووبارە هەوڵ بدە، یان ڤیدیۆکە دابگرە و وەکو فایل بنێرە (تا ٢٠ مێگابایت).")
-ERR_BIG         = ("فایلەکە لە ٢٠ مێگابایت گەورەترە (سنووری داگرتنەوەی تەلەگرام بۆ بۆتەکان).\n"
-                   "چارەسەر: بەشێکی بچووکتر بنێرە، یان لینکی ڤیدیۆکە بنێرە.")
-ERR_SCANNED     = "ئەم فایلی PDF ە دەقی نووسراوی تێدا نییە (وەکو وێنەیەکی سکانیکراوە) و بەبێ OCR ناتوانرێت بخوێنرێتەوە."
+def err_big():
+    """پەیامی فایلی گەورە — بەپێی جۆری خاڵی Telegram."""
+    if LOCAL_BOT_API:
+        return "فایلەکە لە ٢ گێگابایت گەورەترە — ئەمە زۆرترین سنووری تەلەگرامە بۆ فایل."
+    return ("فایلەکە لە ٢٠ مێگابایت گەورەترە — سنووری داگرتنەوەی تەلەگرامە بۆ بۆتەکان.\n"
+            "چارەسەر:\n"
+            "• لە GitHub دوو secret زیاد بکە: TG_API_ID و TG_API_HASH (لە my.telegram.org بەخۆڕایین)\n"
+            "  — ئەوسا فایلەکان تا ٢ گێگابایت دەگرم و خۆکارانە بچووکی دەکەمەوە بۆ خوار ٢٠ مێگابایت.\n"
+            "• یان لینکی ڤیدیۆکە بنێرە (YouTube / TikTok / Facebook...).\n"
+            "• یان ڤیدیۆکە بچووکتر بکە و دووبارە بنێرە.")
+ERR_SCANNED     = ("ئەم فایلی PDF ە دەقی نووسراوی تێدا نییە (وەکو وێنەی سکانیکراوە).\n"
+                   "هەوڵی OCR درا بەڵام دەقی گونجاوی لێ دەرنەچوو — لەوانەیە کوالیتی وێنەکان زۆر لاواز بێت.\n"
+                   "چارەسەر: وێنەی ڕوونتر بە PDF بنێرە، یان دەقەکە بە TXT بنێرە.")
 ERR_LONG        = "پرۆسێسەکە زۆر درێژ کێشا و ڕاوەستێنرا. تکایە ڤیدیۆ/فایلەکە بکە بە بەشی بچووکتر."
 ERR_AUDIO       = "نەتوانم دەنگێک لەم فایلە بخوێنمەوە. لەوانەیە بێ دەنگ بێت یان فۆرماتەکە پشتگیری نەکرێت."
 ERR_FFMPEG      = "ئامرازی ffmpeg لەم ژینگەیەدا بەردەست نییە (لە GitHub Actions خۆکارانە دامەزرێت)."
-ERR_TRANS       = "وەرگێڕان سەرنەچوو — کێشە لە خزمەتگوزاری وەرگێڕان ڕوویدا. تکایە دووبارە هەوڵ بدە."
+ERR_TRANS       = ("وەرگێڕان سەرنەچوو — گووگڵ و GLM هەردووکیان وەڵام نەدانەوە.\n"
+                   "بە زۆری دووبارە هەوڵدان سەرکەوتوو دەبێت: تکایە پەیامەکە دووبارە بنێرە.\n"
+                   "(ئەگەر بەردەوام بوو: لە GitHub چێک بکە کە secret ی ZAI_API_KEY ڕاستە)")
 ERR_GEN         = "هەڵەیەکی نەخوازراو ڕوویدا. تکایە دووبارە هەوڵ بدە."
 
 GLM_PROMPT = (
@@ -176,7 +223,7 @@ def tg_call(method, payload=None, files=None, timeout=70):
     if not j.get("ok"):
         desc = j.get("description") or ("http %s" % r.status_code)
         if "too big" in desc.lower():
-            raise BotError(ERR_BIG)
+            raise BotError(err_big())
         raise BotError("Telegram: " + desc)
     return j.get("result")
 
@@ -221,8 +268,8 @@ def tg_send_doc(chat_id, path, caption=None):
 def tg_download(file_id, workdir, name_hint="file"):
     f = tg_call("getFile", {"file_id": file_id}, timeout=60)
     if int(f.get("file_size") or 0) > TG_MAX_FILE:
-        raise BotError(ERR_BIG)
-    url = "https://api.telegram.org/file/bot%s/%s" % (BOT_TOKEN, f["file_path"])
+        raise BotError(err_big())
+    url = "%s/file/bot%s/%s" % (TG_FILE_BASE, BOT_TOKEN, f["file_path"])
     r = SESSION.get(url, timeout=600)
     r.raise_for_status()
     ext = os.path.splitext(f.get("file_path") or "")[1] or ""
@@ -274,38 +321,101 @@ def save_state(state):
 
 
 # -------------------------- وەرگێڕان ---------------------------------
-#  Google Translate (خاڵی بەخۆڕایی translate.googleapis.com) + GLM یەدەگ
+#  Google Translate — چەند ڕێڕەو (translate.googleapis.com، clients5، translate.google.com،
+#  هەرکام بە POST و GET) + GLM/Z.ai یەدەگ بە چەند مۆدێل و چەند سێرڤەر.
+#  ئەمە وا دەکات وەرگێڕان لە GitHub Actions دا بەردەوام بێ (429 ی گووگڵ و مۆدێلی هەڵەی GLM چارە دەکات).
 
-GTX_URL = "https://translate.googleapis.com/translate_a/single"
+GTX_HOSTS = [
+    # (ناونیشان, client, dj) — dj=1 → وەڵامی JSON ی نوێ؛ dict-chrome-ex → array ی کۆن
+    ("https://translate.googleapis.com/translate_a/single", "gtx", True),
+    ("https://clients5.google.com/translate_a/single", "dict-chrome-ex", False),
+    ("https://translate.google.com/translate_a/single", "gtx", True),
+]
+GTX_UA = ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+          "(KHTML, like Gecko) Chrome/124.0 Safari/537.36")
+GTX_ROUNDS = env_int("GTX_ROUNDS", 2)
 _MEMO = {}
 
 
-def _gtx_once(text):
-    """وەرگێڕانێکی تاکی بە گووگڵ. دەگەڕێتەوە: (وەرگێڕان, زمانی سەرچاوە)"""
-    r = SESSION.post(
-        GTX_URL,
-        params={"client": "gtx", "sl": "auto", "tl": TARGET_LANG, "dt": "t", "dj": "1"},
-        data={"q": text},
-        timeout=40,
-    )
-    if r.status_code != 200:
-        raise RuntimeError("gtx http %s" % r.status_code)
-    data = r.json()
-    src = data.get("src") or ""
-    out = "".join(s.get("trans", "") for s in (data.get("sentences") or []))
-    if not out and text.strip():
+def _parse_gtx(data, text):
+    """پارسکردنی وەڵامی گووگڵ — هەردوو فۆرمات (dj=1 ی dict و array ی کۆن)."""
+    out, src = "", ""
+    if isinstance(data, dict):
+        src = data.get("src") or ""
+        out = "".join(s.get("trans", "") for s in (data.get("sentences") or []))
+    elif isinstance(data, list) and data and isinstance(data[0], list):
+        for seg in (data[0] or []):
+            if seg and isinstance(seg[0], str):
+                out += seg[0]
+        if len(data) > 2 and isinstance(data[2], str):
+            src = data[2]
+    if not out.strip() and text.strip():
         raise RuntimeError("gtx empty result")
     return out, src
 
 
-def _glm_once(text):
-    if not GLM_API_KEY:
-        raise RuntimeError("GLM not configured (set ZAI_API_KEY secret)")
+def _gtx_request(host, client, use_dj, text, use_get):
+    params = {"client": client, "sl": SOURCE_LANG or "auto", "tl": TARGET_LANG, "dt": "t"}
+    if use_dj:
+        params["dj"] = "1"
+    hdrs = {"User-Agent": GTX_UA, "Accept": "*/*"}
+    if use_get:
+        params["q"] = text
+        r = SESSION.get(host, params=params, headers=hdrs, timeout=30)
+    else:
+        r = SESSION.post(host, params=params, data={"q": text}, headers=hdrs, timeout=30)
+    if r.status_code != 200:
+        raise RuntimeError("gtx http %s" % r.status_code)
+    ctype = (r.headers.get("content-type") or "").lower()
+    if not any(x in ctype for x in ("json", "javascript", "text/plain")):
+        raise RuntimeError("gtx bad content-type: %s" % ctype[:50])
+    return _parse_gtx(r.json(), text)
+
+
+def _gtx_once(text):
+    """سازگاری — یەک هەوڵ بە یەکەم ڕێڕەو (بۆ --check و تاقیکردنەوە)."""
+    host, client, use_dj = GTX_HOSTS[0]
+    return _gtx_request(host, client, use_dj, text, use_get=False)
+
+
+def _gtx_translate(text):
+    """هەوڵ بە هەموو ڕێڕەوەکانی گووگڵ (POST پاشان GET، دوو خول) + پشووی بەربڵاو."""
+    last, attempt = None, 0
+    for _rnd in range(GTX_ROUNDS):
+        for host, client, use_dj in GTX_HOSTS:
+            for use_get in (False, True):
+                attempt += 1
+                try:
+                    out, src = _gtx_request(host, client, use_dj, text, use_get)
+                    if src == TARGET_LANG:      # پێشتر سۆرانییە
+                        return text
+                    return out
+                except Exception as e:
+                    last = e
+                    time.sleep(min(0.8 + 1.1 * attempt + random.random() * 1.5, 7))
+    raise last or RuntimeError("gtx failed")
+
+
+GLM_ALT_URLS = ["https://api.z.ai/api/paas/v4", "https://open.bigmodel.cn/api/paas/v4"]
+_glm_combos_cache = None
+_glm_good = None          # (url, model) ی ئەو تێکەڵەی کار دەکات — لەبەر دەکرێت
+
+
+def _glm_combos():
+    """هەموو تێکەڵەکانی (سێرڤەر، مۆدێل) — بە ڕیزبەندی هەوڵ دەدرێن."""
+    global _glm_combos_cache
+    if _glm_combos_cache is None:
+        urls = [GLM_API_URL] + [u for u in GLM_ALT_URLS if u.rstrip("/") != GLM_API_URL]
+        _glm_combos_cache = [(u, m) for u in urls for m in GLM_MODELS]
+    return _glm_combos_cache
+
+
+def _glm_call(url, model, text):
     r = SESSION.post(
-        GLM_API_URL + "/chat/completions",
+        url + "/chat/completions",
         headers={"Authorization": "Bearer " + GLM_API_KEY},
         json={
-            "model": GLM_MODEL,
+            "model": model,
             "temperature": 0.2,
             "messages": [
                 {"role": "system", "content": GLM_PROMPT},
@@ -314,13 +424,39 @@ def _glm_once(text):
         },
         timeout=180,
     )
+    if r.status_code in (401, 403):
+        raise RuntimeError("glm %s http %s @ %s (key not accepted)"
+                           % (model, r.status_code, url))
     if r.status_code != 200:
-        raise RuntimeError("glm http %s" % r.status_code)
+        raise RuntimeError("glm %s http %s: %s" % (model, r.status_code, (r.text or "")[:150]))
     j = r.json()
     out = ((j.get("choices") or [{}])[0].get("message") or {}).get("content") or ""
-    if not out.strip():
-        raise RuntimeError("glm empty result")
-    return out.strip()
+    out = re.sub(r"(?s)<think>.*?</think>", "", out).strip()
+    if not out:
+        raise RuntimeError("glm %s empty result" % model)
+    return out
+
+
+def _glm_once(text):
+    """GLM بە چەند (سێرڤەر، مۆدێل) — تێکەڵەی سەرکەوتوو بۆ خولانی داهاتوو لەبەر دەکرێت."""
+    global _glm_good
+    if not GLM_API_KEY:
+        raise RuntimeError("GLM not configured (set ZAI_API_KEY secret)")
+    combos = _glm_combos()
+    if _glm_good and _glm_good in combos:
+        combos = [_glm_good] + [c for c in combos if c != _glm_good]
+    last = None
+    for url, model in combos:
+        try:
+            out = _glm_call(url, model, text)
+            if _glm_good != (url, model):
+                log.info("GLM working combo: %s / %s", url, model)
+            _glm_good = (url, model)
+            return out
+        except Exception as e:
+            last = e
+            log.warning("%s", e)
+    raise last or RuntimeError("glm failed")
 
 
 def chunk_text(text, size=2800):
@@ -347,17 +483,10 @@ def chunk_text(text, size=2800):
 
 
 def _translate_with_fallback(chunk):
-    last_err = None
-    for attempt in range(3):
-        try:
-            out, src = _gtx_once(chunk)
-            if src == TARGET_LANG:      # پێشتر سۆرانییە
-                return chunk
-            return out
-        except Exception as e:
-            last_err = e
-            time.sleep(1.2 * (attempt + 1) + random.random())
-    log.warning("google failed (%s), trying GLM fallback", last_err)
+    try:
+        return _gtx_translate(chunk)
+    except Exception as ge:
+        log.warning("all Google routes failed (%s), trying GLM fallback", ge)
     try:
         return _glm_once(chunk)
     except Exception as e:
@@ -372,10 +501,10 @@ def translate_text(text):
     if len(text) <= 2800:
         return _translate_with_fallback(text)
     chunks = chunk_text(text)
-    if len(chunks) <= 3:
-        return "".join(_translate_with_fallback(c) for c in chunks)
-    with ThreadPoolExecutor(min(4, len(chunks))) as ex:
-        return "".join(ex.map(_translate_with_fallback, chunks))
+    outs, nfail = translate_map_safe(chunks)
+    if nfail >= len(chunks):
+        raise BotError(ERR_TRANS)      # هەموو پارچەکان سەرنەچوون
+    return "".join(outs)
 
 
 def translate_item(text):
@@ -388,6 +517,26 @@ def translate_item(text):
     out = translate_text(text)
     _MEMO[key] = out
     return out
+
+
+def translate_map_safe(texts, workers=6):
+    """وەرگێڕانی لیستێک بە پاراستنی بەردەوامی: ئەگەر پارچەیەک سەرنەچوو،
+    دەقی ڕەسەن دەمێنێتەوە و تەنها ژمارەکەی دەگەڕێنرێتەوە.
+    دەرەنجام: (لیستی ئەنجامەکان, ژمارەی پارچە سەرنەچووەکان)"""
+    texts = list(texts)
+    if not texts:
+        return [], 0
+
+    def _one(t):
+        try:
+            return translate_item(t), True
+        except Exception as e:
+            log.error("chunk translation failed (%s) — keeping original: %.60r", e, t)
+            return t, False
+
+    with ThreadPoolExecutor(max(1, min(workers, len(texts)))) as ex:
+        res = list(ex.map(_one, texts))
+    return [r[0] for r in res], sum(1 for _, ok in res if not ok)
 
 
 # -------------------------- دۆکیومێنتەکان -----------------------------
@@ -424,8 +573,9 @@ def translate_srt(data):
     cues = parse_srt(data)
     if not cues:
         return "", [], []
-    with ThreadPoolExecutor(6) as ex:
-        outs = list(ex.map(translate_item, [c[1] for c in cues]))
+    outs, nfail = translate_map_safe([c[1] for c in cues])
+    if nfail >= len(cues):
+        raise BotError(ERR_TRANS)
     parts = []
     for i, ((stamp, _), out) in enumerate(zip(cues, outs), 1):
         parts.append("%d\n%s\n%s\n" % (i, stamp, (out or "").strip()))
@@ -490,8 +640,9 @@ def process_docx(data):
     if not paras:
         return data
     texts = [p.text for p in paras]
-    with ThreadPoolExecutor(6) as ex:
-        outs = list(ex.map(translate_item, texts))
+    outs, nfail = translate_map_safe(texts)
+    if nfail >= len(texts):
+        raise BotError(ERR_TRANS)      # هەموو پاراگرافەکان سەرنەچوون
     for p, out in zip(paras, outs):
         _set_para_text(p, out)
     buf = io.BytesIO()
@@ -569,8 +720,9 @@ def process_pptx(data):
     if not items:
         return data
     texts = [t for _, t in items]
-    with ThreadPoolExecutor(6) as ex:
-        outs = list(ex.map(translate_item, texts))
+    outs, nfail = translate_map_safe(texts)
+    if nfail >= len(texts):
+        raise BotError(ERR_TRANS)      # هەموو دەقەکان سەرنەچوون
     for (para, _), out in zip(items, outs):
         _set_ppt_para(para, out)
     buf = io.BytesIO()
@@ -653,6 +805,68 @@ def extract_pdf_text(data):
             pages.append("")
     doc.close()
     if not has_letters("".join(pages)):
+        raise BotError(ERR_SCANNED)
+    return pages
+
+
+def ocr_pdf_pages(data, workdir, dpi=170, max_pages=40):
+    """OCR بۆ PDF ی سکانیکراو بە tesseract (ara+eng) — بۆ ئەو PDF اIANE کە دەقیان نییە.
+    None ئەگەر tesseract بەردەست نییە یان دەقی گونجاو دەرنەچوو."""
+    if not shutil.which("tesseract"):
+        log.info("tesseract not available — OCR skipped")
+        return None
+    doc = fitz_mod.open(stream=data, filetype="pdf")
+    tmpdir = tempfile.mkdtemp(prefix="ocr_", dir=workdir)
+    pages = []
+    try:
+        for i, pg in enumerate(doc):
+            if i >= max_pages:
+                break
+            png = os.path.join(tmpdir, "pg%03d.png" % i)
+            try:
+                pg.get_pixmap(dpi=dpi).save(png)
+                res = subprocess.run(["tesseract", png, "stdout", "-l", "ara+eng"],
+                                     capture_output=True, text=True, timeout=240)
+                pages.append((res.stdout or "") if res.returncode == 0 else "")
+            except Exception:
+                pages.append("")
+            finally:
+                try:
+                    os.remove(png)
+                except Exception:
+                    pass
+    finally:
+        doc.close()
+        shutil.rmtree(tmpdir, ignore_errors=True)
+    if not has_letters("".join(pages)):
+        return None
+    log.info("OCR extracted %d chars from %d pages",
+             sum(len(p) for p in pages), len(pages))
+    return pages
+
+
+def extract_pdf_text_or_ocr(data, workdir):
+    """دەرهێنانی دەقی PDF؛ ئەگەر سکانیکراو بوو یان دەق زۆر کەم بوو، خۆکارانە OCR تاقی دەکاتەوە."""
+    pages = None
+    try:
+        pages = extract_pdf_text(data)
+    except BotError:
+        pages = None
+    if pages:
+        avg = sum(len(p.strip()) for p in pages) / max(1, len(pages))
+        if avg < 40:      # دەق زۆر کەمە بەرامبەر پەڕەکان — لەوانەیە سکانیکراوە
+            try:
+                ocr = ocr_pdf_pages(data, workdir)
+                if ocr and sum(len(x) for x in ocr) > sum(len(x) for x in pages):
+                    pages = ocr
+            except Exception as e:
+                log.warning("OCR fallback failed: %s", e)
+        return pages
+    try:
+        pages = ocr_pdf_pages(data, workdir)
+    except Exception as e:
+        log.warning("OCR failed: %s", e)
+    if not pages:
         raise BotError(ERR_SCANNED)
     return pages
 
@@ -984,6 +1198,131 @@ def pptx_to_pdf(pptx_path, workdir, title):
         return None
 
 
+# ------------------- دەنگی کوردی سۆرانی (TTS) -----------------------
+#  kurdishtts.com — POST /api/tts-proxy بە x-api-key → دەنگی سۆرانی (wav/mp3)
+#  پلانی خۆڕایی: 20,000 پیت/مانگ، 500 پیت بۆ هەر داواکاری — دەنگی خۆڕایی: sorani_85
+
+_TTS_MEMO = {}
+
+
+def tts_available():
+    return bool(TTS_API_KEY)
+
+
+def _tts_once(text):
+    if not TTS_API_KEY:
+        raise RuntimeError("KurdishTTS not configured (set KURDISH_TTS_API_KEY secret)")
+    r = SESSION.post(
+        TTS_API_URL,
+        headers={"x-api-key": TTS_API_KEY, "Content-Type": "application/json"},
+        json={"text": text[:490], "speaker_id": TTS_SPEAKER,
+              "model_version": TTS_MODEL_V, "format": "mp3",
+              "speed": TTS_SPEED, "dialect": "sorani"},
+        timeout=120,
+    )
+    if r.status_code in (401, 403):
+        raise RuntimeError("kurdishtts http %s — key/quota: %s"
+                           % (r.status_code, (r.text or "")[:120]))
+    if r.status_code != 200:
+        raise RuntimeError("kurdishtts http %s: %s" % (r.status_code, (r.text or "")[:120]))
+    if len(r.content) < 512:
+        raise RuntimeError("kurdishtts tiny response (%d bytes)" % len(r.content))
+    return r.content
+
+
+def tts_clip(text):
+    """دەنگی پارچەیەک بە یادەوەری — None ئەگەر سەرنەچوو."""
+    key = (text or "").strip()
+    if not key:
+        return None
+    if key in _TTS_MEMO:
+        return _TTS_MEMO[key]
+    try:
+        data = _tts_once(key)
+    except Exception as e:
+        log.warning("tts failed: %s", e)
+        _TTS_MEMO[key] = None
+        return None
+    _TTS_MEMO[key] = data
+    return data
+
+
+def build_kurdish_voice_track(cues, texts, total_dur, workdir, workers=3):
+    """تراکێکی دەنگی سۆرانی لە ژێرنووسە وەرگێڕدراوەکان دروست دەکات،
+    هەر پارچەیەک لە کاتی خۆی دادەنرێت (adelay + amix). ئەگەر هیچ کلیپێک نەبوو None."""
+    if not shutil.which("ffmpeg"):
+        raise BotError(ERR_FFMPEG)
+    tdir = tempfile.mkdtemp(prefix="tts_", dir=workdir)
+    items, used = [], 0
+    for i, ((st, en, _), t) in enumerate(zip(cues, texts)):
+        t = (t or "").strip()
+        if not t:
+            continue
+        if used + len(t) > TTS_MAX_CHARS:
+            log.info("tts char budget reached (%d/%d) — remaining cues skipped",
+                     used, TTS_MAX_CHARS)
+            break
+        used += len(t)
+        items.append((i, float(st), t))
+    if not items:
+        return None
+
+    def _get(item):
+        i, st, t = item
+        b = tts_clip(t)
+        if not b:
+            return None
+        p = os.path.join(tdir, "c%04d.mp3" % i)
+        try:
+            with open(p, "wb") as fh:
+                fh.write(b)
+        except Exception:
+            return None
+        return (st, p)
+
+    clips = []
+    with ThreadPoolExecutor(max(1, min(workers, len(items)))) as ex:
+        for r in ex.map(_get, items):
+            if r:
+                clips.append(r)
+    if not clips:
+        return None
+    clips.sort(key=lambda x: x[0])
+
+    total = max(float(total_dur or 0), clips[-1][0] + 2.0) + 1.0
+    sil = os.path.join(tdir, "sil.wav")
+    try:
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+             "-i", "anullsrc=r=44100:cl=stereo", "-t", "%.2f" % total, sil],
+            capture_output=True, text=True, timeout=300)
+        if res.returncode != 0:
+            return None
+        inputs = ["-i", sil]
+        parts, mix = [], "[0:a]"
+        for idx, (st, p) in enumerate(clips, 1):
+            inputs += ["-i", p]
+            d = int(st * 1000)
+            parts.append("[%d:a]aresample=44100,adelay=%d|%d[a%d]" % (idx, d, d, idx))
+            mix += "[a%d]" % idx
+        parts.append("%samix=inputs=%d:duration=first:normalize=0[out]"
+                     % (mix, len(clips) + 1))
+        out = os.path.join(tdir, "voice.wav")
+        res = subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error"] + inputs +
+            ["-filter_complex", ";".join(parts), "-map", "[out]",
+             "-c:a", "pcm_s16le", out],
+            capture_output=True, text=True, timeout=1800)
+        if res.returncode != 0 or not os.path.exists(out) or os.path.getsize(out) == 0:
+            log.warning("voice track failed: %s", (res.stderr or "")[-400:])
+            return None
+        log.info("voice track built: %d clips, %.1fs", len(clips), total)
+        return out
+    except Exception as e:
+        log.warning("voice track error: %s", e)
+        return None
+
+
 # ----------------------- ڤیدیۆ / دەنگ -----------------------------
 
 def ffmpeg_extract(src, dst):
@@ -1027,6 +1366,117 @@ def ffprobe_has_video(path):
         return False
 
 
+def ffprobe_dims(path):
+    """(پان, بەرزی) ی تراکی ڤیدیۆ — ئەگەر نەبوو (0, 0)."""
+    if not shutil.which("ffprobe"):
+        return 0, 0
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "v:0",
+             "-show_entries", "stream=width,height", "-of", "csv=p=0:s=x", path],
+            capture_output=True, text=True, timeout=60)
+        for line in (res.stdout or "").splitlines():
+            line = line.strip()
+            if "x" in line:
+                a, b = line.split("x", 1)
+                try:
+                    return int(float(a)), int(float(b))
+                except ValueError:
+                    continue
+        return 0, 0
+    except Exception:
+        return 0, 0
+
+
+def compress_video(src, dst, target_mb, workdir, timeout=2400):
+    """بچووککردنەوەی ڤیدیۆ بۆ خوار target_mb مێگابایت — دوو-پاس بە bitrate ی ژمێریارکراو.
+    ئەگەر وێنەکە گەورەیە و bitrate کەمە، خۆکارانە بۆ 720p/480p دادەبەزێت.
+    ئەگەر سەرکەوتوو نەبوو None دەگەڕێنێتەوە."""
+    dur = ffprobe_duration(src)
+    if dur <= 0:
+        return None
+    target_mb = max(0.3, float(target_mb))
+    audio_kbps = 96
+    v_kbps = int(target_mb * 1024 * 1024 * 8.0 / dur / 1000.0 * 0.96) - audio_kbps
+    v_kbps = max(100, v_kbps)
+    _, h = ffprobe_dims(src)
+    vf = None
+    if h:
+        if v_kbps < 350 and h > 480:
+            vf = "scale=-2:480"
+        elif v_kbps < 900 and h > 720:
+            vf = "scale=-2:720"
+    passlog = os.path.join(workdir, "x264pass")
+
+    def _two_pass(vk, out):
+        base = ["ffmpeg", "-y", "-loglevel", "error", "-i", src]
+        if vf:
+            base += ["-vf", vf]
+        opts = ["-c:v", "libx264", "-preset", "veryfast",
+                "-b:v", "%dk" % vk,
+                "-maxrate", "%dk" % int(vk * 1.45),
+                "-bufsize", "%dk" % (vk * 3),
+                "-c:a", "aac", "-b:a", "%dk" % audio_kbps]
+        cmd1 = base + opts + ["-pass", "1", "-passlogfile", passlog,
+                              "-f", "null", "/dev/null"]
+        cmd2 = base + opts + ["-pass", "2", "-passlogfile", passlog,
+                              "-movflags", "+faststart", out]
+        for c in (cmd1, cmd2):
+            try:
+                res = subprocess.run(c, capture_output=True, text=True, timeout=timeout)
+            except subprocess.TimeoutExpired:
+                return False
+            if res.returncode != 0:
+                log.warning("compress pass failed: %s", (res.stderr or "")[-300:])
+                return False
+        return os.path.exists(out) and os.path.getsize(out) > 0
+
+    try:
+        ok = _two_pass(v_kbps, dst)
+        if ok and os.path.getsize(dst) > target_mb * 1024 * 1024 * 1.02:
+            ok = _two_pass(int(v_kbps * 0.8), dst)   # هەوڵێکی تر بە bitrate ی نزمتر
+    finally:
+        for f in glob.glob(passlog + "*"):
+            try:
+                os.remove(f)
+            except Exception:
+                pass
+    return dst if ok else None
+
+
+def shrink_source_for_processing(path, workdir):
+    """ئەگەر ڤیدیۆ زۆر گەورەیە (لە SHRINK_OVER_MB زیاتر یان بەرزی > 720)،
+    پێش وەرگێڕان و سووتاندنی ژێرنووس بۆ 720p بچووکی دەکرێتەوە — خێراتر کار دەکات.
+    ئەگەر بچووککردنەوە سوود نەبوو، فایلی ڕەسەن دەگەڕێنێتەوە."""
+    try:
+        if not shutil.which("ffmpeg"):
+            return path
+        size = os.path.getsize(path)
+        _, h = ffprobe_dims(path)
+        if size <= SHRINK_OVER_MB * 1024 * 1024 and (not h or h <= 720):
+            return path
+        out = os.path.join(os.path.dirname(path) or workdir, "src_small.mp4")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", path]
+        if h and h > 720:
+            cmd += ["-vf", "scale=-2:720"]
+        cmd += ["-c:v", "libx264", "-crf", "26", "-preset", "veryfast",
+                "-c:a", "aac", "-b:a", "128k", out]
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3000)
+        if (res.returncode == 0 and os.path.exists(out) and os.path.getsize(out) > 0
+                and os.path.getsize(out) < size):
+            log.info("source shrunk: %.1fMB -> %.1fMB",
+                     size / 1048576.0, os.path.getsize(out) / 1048576.0)
+            try:
+                os.remove(path)
+            except Exception:
+                pass
+            return out
+        log.warning("shrink did not help — keeping original")
+    except Exception as e:
+        log.warning("shrink failed: %s", e)
+    return path
+
+
 def _ass_font_family(font_path):
     stem = os.path.splitext(os.path.basename(font_path or ""))[0]
     stem = stem.split("-")[0]
@@ -1041,8 +1491,9 @@ def _ass_style(font_path):
             "Outline=2,Shadow=1,Alignment=2,MarginV=28,Spacing=0.3" % fam)
 
 
-def burn_subtitles(src_video, srt_path, out_path, workdir, timeout=2400):
+def burn_subtitles(src_video, srt_path, out_path, workdir, timeout=2400, voice_track=None):
     """ژێرنووسی کوردی دەکاتەوە سەر خۆی ڤیدیۆکە (ffmpeg + libass).
+    ئەگەر voice_track درابێت، دەنگی کوردی جیگای دەنگی ڕەسەن دادەنرێت.
     فۆنتی عەرەبی/کوردی لە fontsdir دا دەدۆزرێتەوە. ئەگەر سەرنەچوو None."""
     if not shutil.which("ffmpeg"):
         raise BotError(ERR_FFMPEG)
@@ -1057,11 +1508,15 @@ def burn_subtitles(src_video, srt_path, out_path, workdir, timeout=2400):
     fontsdir = os.path.dirname(font_path) if font_path else "/usr/share/fonts"
     vf = "subtitles=burn_subs.srt:fontsdir=%s:force_style='%s'" % (fontsdir, _ass_style(font_path))
     out_tmp = os.path.join(cwd, "burn_out.mp4")
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src_local,
-           "-vf", vf,
-           "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-           "-c:a", "aac", "-b:a", "160k",
-           "-movflags", "+faststart", out_tmp]
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src_local]
+    if voice_track and os.path.exists(voice_track):
+        # دەنگی کوردی جیگای دەنگی ڕەسەن دەگرێتەوە
+        cmd += ["-i", os.path.abspath(voice_track),
+                "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
+    cmd += ["-vf", vf,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-c:a", "aac", "-b:a", "160k",
+            "-movflags", "+faststart", out_tmp]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True,
                              timeout=timeout, cwd=cwd)
@@ -1070,24 +1525,6 @@ def burn_subtitles(src_video, srt_path, out_path, workdir, timeout=2400):
     if res.returncode != 0 or not os.path.exists(out_tmp) or os.path.getsize(out_tmp) == 0:
         log.warning("burn failed: %s", (res.stderr or "")[-600:])
         return None
-    # ئەگەر قەبارەکە گەورەترە لە سنووری تەلەگرام، بە bitrate ی ژمێریارکراو دووبارە بیکەوە
-    if os.path.getsize(out_tmp) > 45 * 1024 * 1024:
-        dur = ffprobe_duration(out_tmp) or ffprobe_duration(src_local)
-        if dur > 0:
-            kbps = max(300, int(40 * 1024 * 1024 * 8.0 / dur / 1000))
-            out_tmp2 = os.path.join(cwd, "burn_out2.mp4")
-            cmd2 = ["ffmpeg", "-y", "-loglevel", "error", "-i", out_tmp,
-                    "-c:v", "libx264", "-preset", "veryfast",
-                    "-b:v", "%dk" % kbps, "-maxrate", "%dk" % int(kbps * 1.4),
-                    "-bufsize", "%dk" % (kbps * 3),
-                    "-c:a", "copy", "-movflags", "+faststart", out_tmp2]
-            try:
-                subprocess.run(cmd2, capture_output=True, text=True,
-                               timeout=timeout, cwd=cwd)
-                if os.path.exists(out_tmp2) and os.path.getsize(out_tmp2) > 0:
-                    os.replace(out_tmp2, out_tmp)
-            except Exception:
-                pass
     shutil.move(out_tmp, out_path)
     return out_path
 
@@ -1159,6 +1596,40 @@ def merge_cues(segs, max_dur=12.0, max_gap=1.2):
     return out
 
 
+def split_long_cues(cues, max_dur=12.0, max_chars=95):
+    """بەشە زۆر درێژەکان دەکات بە چەند ژێرنووسی بچووکتر:
+    - خوێندنئاسانتر لەسەر ڤیدیۆ
+    - وەرگێڕان بە پارچەی بچووکتر — متمانەبەخۆتر و خێراتر
+    کاتەکان بەپێی درێژی دەق بە شێوەی ڕێژەیی دابەش دەکرێن."""
+    out = []
+    for st, en, txt in cues:
+        txt = (txt or "").strip()
+        if not txt:
+            continue
+        dur = max(0.4, float(en) - float(st))
+        if dur <= max_dur and len(txt) <= max_chars:
+            out.append((float(st), float(en), txt))
+            continue
+        words = txt.split()
+        cps = len(txt) / dur          # پیت بۆ چرکە
+        t_cur = float(st)
+        buf = ""
+        for w in words:
+            cand = (buf + " " + w) if buf else w
+            over_time = (t_cur + len(cand) / cps - float(st)) > dur
+            if len(cand) > max_chars or over_time:
+                if buf:
+                    t_next = min(float(en), t_cur + len(buf) / cps)
+                    out.append((t_cur, max(t_next, t_cur + 0.4), buf))
+                    t_cur = t_next
+                buf = w
+            else:
+                buf = cand
+        if buf:
+            out.append((t_cur, float(en), buf))
+    return out
+
+
 def render_srt(cues, texts):
     blocks = []
     for i, ((st, en, _), t) in enumerate(zip(cues, texts), 1):
@@ -1222,9 +1693,11 @@ def ytdl_download(url, workdir):
     return path, title, duration
 
 
-def run_speech_pipeline(src_path, chat, workdir):
+def run_speech_pipeline(src_path, chat, workdir, state=None):
     t0 = time.time()
     tg_action(chat, "typing")
+    # ---- ئەگەر ڤیدیۆ زۆر گەورەیە، پێش هەموو شتێک بچووکی دەکەینەوە ----
+    src_path = shrink_source_for_processing(src_path, workdir)
     wav = os.path.join(workdir, "audio_16k.wav")
     ffmpeg_extract(src_path, wav)
     tg_send(chat, "دەنگەکە دەخوێنمەوە... (ئەم قۆناغە ماوەیەک دەخایەنێت)")
@@ -1233,11 +1706,23 @@ def run_speech_pipeline(src_path, chat, workdir):
         raise BotError(ERR_AUDIO)
     lang = getattr(info, "language", None) or "?"
     dur = getattr(info, "duration", 0) or (segs[-1][1] if segs else 0)
-    cues = merge_cues(segs)
+    cues = split_long_cues(merge_cues(segs))
     tg_send(chat, MSG_TRANSCRIBED.format(lang=lang, dur=fmt_dur(dur), n=len(cues)))
     texts = [c[2] for c in cues]
-    with ThreadPoolExecutor(6) as ex:
-        outs = list(ex.map(translate_item, texts))
+    outs, nfail = translate_map_safe(texts)
+    if nfail >= len(cues):
+        # هەموو وەرگێڕانەکە سەرنەچوو — لانیکەم نووسینی ڕەسەن بنێرەوە
+        try:
+            orig = os.path.join(workdir, "transcript_original.txt")
+            with open(orig, "w", encoding="utf-8") as fh:
+                fh.write("\n".join(texts))
+            _safe_send(chat, "هەڵە: " + ERR_TRANS)
+            tg_send_doc(chat, orig, MSG_ORIG_TRANSCRIPT)
+        except Exception:
+            pass
+        return
+    if nfail:
+        _safe_send(chat, MSG_TRANS_PARTIAL.format(n=nfail))
     tg_action(chat, "upload_document")
     base = sanitize(os.path.splitext(os.path.basename(src_path))[0]) or "video"
     srt_path = os.path.join(workdir, "sorani_%s.srt" % base)
@@ -1260,6 +1745,24 @@ def run_speech_pipeline(src_path, chat, workdir):
     tg_send_doc(chat, docx_path, None)
     if pdf_path:
         tg_send_doc(chat, pdf_path, None)
+    # ---- دەنگی کوردی سۆرانی (TTS) ئەگەر بەکارهێنەر چالاکی کردبێت ----
+    voice_on = bool((((state or {}).get("voice")) or {}).get(str(chat)))
+    voice_track = None
+    if voice_on:
+        if not tts_available():
+            _safe_send(chat, MSG_TTS_NOKEY)
+        elif ffprobe_has_video(src_path):
+            v_chk = float(dur or 0) or ffprobe_duration(src_path)
+            if not (v_chk and v_chk > BURN_MAX_MINUTES * 60):
+                tg_send(chat, MSG_TTS_START)
+                tg_action(chat, "upload_video")
+                try:
+                    voice_track = build_kurdish_voice_track(cues, outs, dur, workdir)
+                except BotError as e:
+                    _safe_send(chat, "هەڵە: %s" % e)
+                    voice_track = None
+                if not voice_track:
+                    _safe_send(chat, MSG_TTS_FAIL)
     # ---- ژێرنووسی کوردی لەسەر خۆی ڤیدیۆ (burn-in) ----
     if BURN_SUBTITLES:
         v_dur = float(dur or 0) or ffprobe_duration(src_path)
@@ -1268,16 +1771,36 @@ def run_speech_pipeline(src_path, chat, workdir):
         elif v_dur and v_dur > BURN_MAX_MINUTES * 60:
             _safe_send(chat, MSG_BURN_SKIPPED.format(max=BURN_MAX_MINUTES))
         else:
-            tg_send(chat, MSG_BURN_START)
+            if not voice_track:
+                tg_send(chat, MSG_BURN_START)
             tg_action(chat, "upload_video")
             vid_out = os.path.join(workdir, "sorani_%s_subtitled.mp4" % base)
             try:
-                vid_path = burn_subtitles(src_path, srt_path, vid_out, workdir)
+                vid_path = burn_subtitles(src_path, srt_path, vid_out, workdir,
+                                          voice_track=voice_track)
             except BotError as e:
                 _safe_send(chat, "هەڵە: %s" % e)
                 vid_path = None
-            if vid_path and os.path.exists(vid_path) and os.path.getsize(vid_path) <= 49 * 1024 * 1024:
-                tg_send_video(chat, vid_path, CAPTION_BURN)
+            if vid_path and os.path.exists(vid_path):
+                # ---- بچووککردنەوە بۆ خوار OUT_VIDEO_MAX_MB (بنەڕەت ٢٠ مێگابایت) ----
+                limit_mb = OUT_VIDEO_MAX_MB
+                if os.path.getsize(vid_path) > limit_mb * 1024 * 1024:
+                    _safe_send(chat, MSG_COMPRESS.format(mb=limit_mb))
+                    tg_action(chat, "upload_video")
+                    small = os.path.join(workdir, "sorani_%s_subtitled_small.mp4" % base)
+                    try:
+                        cpath = compress_video(vid_path, small,
+                                               max(8.0, limit_mb - 1.0), workdir)
+                    except Exception as e:
+                        log.warning("compress failed: %s", e)
+                        cpath = None
+                    if (cpath and os.path.exists(cpath) and os.path.getsize(cpath) > 0
+                            and os.path.getsize(cpath) < os.path.getsize(vid_path)):
+                        vid_path = cpath
+                if os.path.getsize(vid_path) <= 49 * 1024 * 1024:
+                    tg_send_video(chat, vid_path, CAPTION_BURN)
+                else:
+                    _safe_send(chat, MSG_BURN_FAIL)
             else:
                 _safe_send(chat, MSG_BURN_FAIL)
 
@@ -1315,7 +1838,7 @@ def handle_document_file(tg_file, name, chat, workdir):
     if not kind:
         raise BotError(MSG_UNSUPPORTED)
     if int(tg_file.get("file_size") or 0) > TG_MAX_FILE:
-        raise BotError(ERR_BIG)
+        raise BotError(err_big())
     tg_send(chat, MSG_DOC_START)
     path = tg_download(tg_file["file_id"], workdir, name)
     with open(path, "rb") as fh:
@@ -1326,9 +1849,10 @@ def handle_document_file(tg_file, name, chat, workdir):
     caption = CAPTION_DOC
 
     if kind == ".pdf":
-        pages = extract_pdf_text(data)
-        with ThreadPoolExecutor(4) as ex:
-            tpages = list(ex.map(translate_text, pages))
+        pages = extract_pdf_text_or_ocr(data, workdir)
+        tpages, nfail = translate_map_safe(pages, workers=4)
+        if nfail >= len(pages):
+            raise BotError(ERR_TRANS)
         try:
             out_path = build_pdf(tpages,
                                  os.path.join(workdir, "sorani_%s.pdf" % stem),
@@ -1402,15 +1926,15 @@ def handle_document_file(tg_file, name, chat, workdir):
         tg_send_doc(chat, pdf_path, CAPTION_PDF)
 
 
-def handle_media_file(tg_file, chat, workdir, name_hint="media"):
+def handle_media_file(tg_file, chat, workdir, name_hint="media", state=None):
     if int(tg_file.get("file_size") or 0) > TG_MAX_FILE:
-        raise BotError(ERR_BIG)
+        raise BotError(err_big())
     tg_send(chat, MSG_MEDIA_START)
     path = tg_download(tg_file["file_id"], workdir, name_hint)
-    run_speech_pipeline(path, chat, workdir)
+    run_speech_pipeline(path, chat, workdir, state)
 
 
-def handle_link(url, chat, workdir):
+def handle_link(url, chat, workdir, state=None):
     tg_action(chat, "typing")
     tg_send(chat, PROG_DOWNLOAD)
     try:
@@ -1424,7 +1948,7 @@ def handle_link(url, chat, workdir):
     if duration:
         msg += "\nماوە: %s" % fmt_dur(duration)
     tg_send(chat, msg)
-    run_speech_pipeline(src_path, chat, workdir)
+    run_speech_pipeline(src_path, chat, workdir, state)
 
 
 def handle_text_translate(text, chat):
@@ -1436,21 +1960,49 @@ def handle_text_translate(text, chat):
         tg_send(chat, out)
 
 
-def handle_message(msg, chat, workdir):
+def handle_command(text, chat, state):
+    """فەرمانەکان — True ئەگەر مامەڵە کرابێت."""
+    parts = text.split()
+    cmd = (parts[0] if parts else "").split("@")[0].lower()
+    is_dict = isinstance(state, dict)
+    voice = state.setdefault("voice", {}) if is_dict else {}
+    if cmd in ("/voice_on", "/deng_on", "/voiceon", "/dengon"):
+        if is_dict:
+            voice[str(chat)] = True
+            save_state(state)
+        tg_send(chat, MSG_VOICE_ON if tts_available() else MSG_TTS_NOKEY)
+        return True
+    if cmd in ("/voice_off", "/deng_off", "/voiceoff", "/dengoff"):
+        if is_dict:
+            voice[str(chat)] = False
+            save_state(state)
+        tg_send(chat, MSG_VOICE_OFF)
+        return True
+    if cmd in ("/voice", "/deng", "/voice_status", "/settings"):
+        on = voice.get(str(chat)) if is_dict else False
+        tg_send(chat, MSG_VOICE_STATUS_ON if on else MSG_VOICE_STATUS_OFF)
+        return True
+    if cmd.startswith("/"):
+        tg_send(chat, WELCOME)
+        return True
+    return False
+
+
+def handle_message(msg, chat, workdir, state=None):
     doc = msg.get("document")
     if doc:
         name = doc.get("file_name") or "file"
         if route_document(name, doc.get("mime_type") or ""):
             handle_document_file(doc, name, chat, workdir)
         elif route_media(name, doc.get("mime_type") or ""):
-            handle_media_file(doc, chat, workdir, os.path.basename(name))
+            handle_media_file(doc, chat, workdir, os.path.basename(name), state)
         else:
             raise BotError(MSG_UNSUPPORTED)
         return
 
     for key in ("video", "voice", "audio", "video_note"):
         if key in msg:
-            handle_media_file(msg[key], chat, workdir, key)
+            handle_media_file(msg[key], chat, workdir, key, state)
             return
 
     text = (msg.get("text") or "").strip()
@@ -1460,25 +2012,25 @@ def handle_message(msg, chat, workdir):
         raise BotError(MSG_UNSUPPORTED)
 
     if text.startswith("/"):
-        tg_send(chat, WELCOME)
+        handle_command(text, chat, state)
         return
 
     m = re.search(r"https?://\S+", text)
     if m:
-        handle_link(m.group(0).rstrip(".,;)]}>"), chat, workdir)
+        handle_link(m.group(0).rstrip(".,;)]}>"), chat, workdir, state)
         return
 
     handle_text_translate(text, chat)
 
 
-def process_update(u, workdir):
+def process_update(u, workdir, state=None):
     msg = u.get("message") or {}
     chat = (msg.get("chat") or {}).get("id")
     if not chat:
         return
     task_dir = tempfile.mkdtemp(prefix="task_", dir=workdir)
     try:
-        handle_message(msg, chat, task_dir)
+        handle_message(msg, chat, task_dir, state)
     except BotError as e:
         _safe_send(chat, "هەڵە: %s" % e)
     except Exception:
@@ -1493,12 +2045,18 @@ def process_update(u, workdir):
 def self_check():
     print("== sorani-translator-bot :: self check ==")
     print("BOT_TOKEN:", "set" if BOT_TOKEN else "MISSING (add GitHub secret)")
-    print("GLM fallback:", ("enabled, model=" + GLM_MODEL) if GLM_API_KEY else "not configured (Google only)")
+    print("GLM fallback:", ("enabled, models=" + ",".join(GLM_MODELS)) if GLM_API_KEY else "not configured (Google only)")
     print("whisper model:", WHISPER_MODEL, "| max video minutes:", MAX_VIDEO_MINUTES or "unlimited")
     print("ffmpeg:", shutil.which("ffmpeg") or "MISSING")
     print("libreoffice:", shutil.which("soffice") or "missing (ReportLab fallback will be used)")
+    print("tesseract OCR:", shutil.which("tesseract") or "missing (scanned PDFs will fail)")
     print("burn subtitles:", ("on, max %d min" % BURN_MAX_MINUTES) if BURN_SUBTITLES else "off")
     print("pdf copy:", "on" if SEND_PDF_COPY else "off")
+    print("output video limit:", "%d MB (auto-compress)" % OUT_VIDEO_MAX_MB)
+    print("telegram api:", ("LOCAL Bot API server (%s) — files up to 2GB" % TG_BASE)
+          if LOCAL_BOT_API else "official api.telegram.org — downloads up to 20MB")
+    print("kurdish tts:", ("on, speaker=%s" % TTS_SPEAKER) if TTS_API_KEY
+          else "off (set KURDISH_TTS_API_KEY secret)")
     try:
         import yt_dlp
         print("yt-dlp:", yt_dlp.version.__version__)
@@ -1509,11 +2067,19 @@ def self_check():
         print("faster-whisper: OK")
     except Exception as e:
         print("faster-whisper: FAIL", e)
-    try:
-        out, src = _gtx_once("Hello, how are you today?")
-        print("Google translate: OK  (src=%s) sample: %s" % (src, out[:80]))
-    except Exception as e:
-        print("Google translate: FAIL", e)
+    for i, (host, client, use_dj) in enumerate(GTX_HOSTS, 1):
+        name = host.split("/")[2]
+        try:
+            out, src = _gtx_request(host, client, use_dj, "Hello, how are you today?", False)
+            print("Google route %d (%s): OK (src=%s) sample: %s" % (i, name, src, out[:60]))
+        except Exception as e:
+            print("Google route %d (%s): FAIL %s" % (i, name, e))
+    if TTS_API_KEY:
+        try:
+            b = _tts_once("سڵاو")
+            print("Kurdish TTS: OK (%d bytes)" % len(b))
+        except Exception as e:
+            print("Kurdish TTS: FAIL", e)
     print("done.")
 
 
@@ -1551,7 +2117,7 @@ def main():
             break
         for u in updates:
             try:
-                process_update(u, workdir)
+                process_update(u, workdir, state)
             except Exception:
                 log.error("process_update crashed:\n%s", traceback.format_exc())
             state["offset"] = u["update_id"] + 1
