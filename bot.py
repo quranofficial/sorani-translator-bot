@@ -1747,14 +1747,19 @@ def get_whisper():
 
 
 def transcribe_file(wav_path, t0):
+    """وەرگێڕانی دەنگ بە Whisper — لەگەڵ کاتی وردی هەر وشەیەک (word_timestamps):
+    هەر وشەیەک کاتە وردەکەی خۆی هەیە → ژێرنووسی کوردی ڕێک لە هەمان چرکەی
+    قسەکردنی ڕەسەن دەردەکەوێت، تەنانەت ئەگەر Whisper هەموو ڤیدیۆکە بە یەک
+    بەش بگەڕێنێتەوەش (کە پێشتر دەبوایە بە ڕێژە دابەشی بکەین — نزیکەیی)."""
     model = get_whisper()
     seg_iter, info = model.transcribe(
         wav_path,
         language=SOURCE_LANG,
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
+        word_timestamps=True,
     )
-    segs = []
+    segs, words = [], []
     for s in seg_iter:
         if time.time() - t0 > HEAVY_BUDGET:
             raise BotError(ERR_LONG)
@@ -1763,14 +1768,22 @@ def transcribe_file(wav_path, t0):
         txt = (s.text or "").strip()
         if txt:
             segs.append((float(s.start), float(s.end), txt))
-    return segs, info
+        for w in (getattr(s, "words", None) or []):
+            try:
+                wtxt = (getattr(w, "word", "") or "").strip()
+                wst, wen = float(w.start), float(w.end)
+            except (TypeError, ValueError):
+                continue
+            if wtxt and wen >= wst:
+                words.append((wst, wen, wtxt))
+    return segs, info, words
 
 
 def merge_cues(segs, max_dur=12.0, max_gap=1.2):
     """یەکخستنی بەشە بچووکەکان بۆ ژێرنووسی خوێندنئاسان."""
     out, cur = [], None
     for st, en, txt in segs:
-        if cur is not None and (en - cur[1]) <= max_dur and (st - cur[1]) <= max_gap:
+        if cur is not None and (en - cur[0]) <= max_dur and (st - cur[1]) <= max_gap:
             cur = (cur[0], en, (cur[2] + " " + txt).strip())
         else:
             if cur is not None:
@@ -1796,12 +1809,12 @@ def split_long_cues(cues, max_dur=12.0, max_chars=95):
             out.append((float(st), float(en), txt))
             continue
         words = txt.split()
-        cps = len(txt) / dur          # پیت بۆ چرکە
+        cps = max(1.0, len(txt) / dur)   # پیت بۆ چرکە (بەرگری لە دابەشکردن بە سفر)
         t_cur = float(st)
         buf = ""
         for w in words:
             cand = (buf + " " + w) if buf else w
-            over_time = (t_cur + len(cand) / cps - float(st)) > dur
+            over_time = len(cand) / cps > max_dur
             if len(cand) > max_chars or over_time:
                 if buf:
                     t_next = min(float(en), t_cur + len(buf) / cps)
@@ -1812,6 +1825,49 @@ def split_long_cues(cues, max_dur=12.0, max_chars=95):
                 buf = cand
         if buf:
             out.append((t_cur, float(en), buf))
+    return out
+
+
+def cues_from_words(words, max_dur=7.0, max_chars=95, max_gap=0.9):
+    """دروستکردنی ژێرنووس لە کاتی وردی وشەکان (word_timestamps):
+    هەر ژێرنووسێک لە کاتی دەستپێکی یەکەم وشەی خۆی تا کۆتا وشەی خۆی دانراوە —
+    بۆیە وەرگێڕانی کوردی ڕێک لە هەمان چرکەی قسەکردنی ڕەسەن دەردەکەوێت.
+    پچڕان بۆ ژێرنووسی نوێ لە حاڵەتی:
+    - پشووی سروشتی قسەکردن (بۆشایی > max_gap چرکە)
+    - کۆتایی ڕستە (خاڵبەندی + پشووێکی بچووک)
+    - درێژی کات > max_dur یان ژمارەی پیت > max_chars."""
+    out = []
+    buf = []
+    cur_start = None
+    cur_end = None
+    prev_end = None
+
+    def flush():
+        if buf:
+            st = float(cur_start)
+            en = max(float(cur_end), st + 0.4)
+            out.append((st, en, " ".join(buf)))
+            buf.clear()
+
+    for wst, wen, wtxt in words:
+        wtxt = (wtxt or "").strip()
+        if not wtxt:
+            continue
+        gap = (wst - prev_end) if prev_end is not None else 0.0
+        endpunct = bool(buf) and buf[-1][-1:] in ".!?؟۔،,;:—"
+        if buf and (
+            gap > max_gap
+            or (endpunct and gap > 0.30)
+            or (wen - cur_start) > max_dur
+            or (len(" ".join(buf)) + 1 + len(wtxt)) > max_chars
+        ):
+            flush()
+        if not buf:
+            cur_start = wst
+        buf.append(wtxt)
+        cur_end = wen
+        prev_end = wen
+    flush()
     return out
 
 
@@ -1886,12 +1942,19 @@ def run_speech_pipeline(src_path, chat, workdir, state=None):
     wav = os.path.join(workdir, "audio_16k.wav")
     ffmpeg_extract(src_path, wav)
     tg_send(chat, "دەنگەکە دەخوێنمەوە... (ئەم قۆناغە ماوەیەک دەخایەنێت)")
-    segs, info = transcribe_file(wav, t0)
-    if not segs:
+    segs, info, words = transcribe_file(wav, t0)
+    if not segs and not words:
         raise BotError(ERR_AUDIO)
     lang = getattr(info, "language", None) or "?"
-    dur = getattr(info, "duration", 0) or (segs[-1][1] if segs else 0)
-    cues = split_long_cues(merge_cues(segs))
+    dur = (getattr(info, "duration", 0) or (segs[-1][1] if segs else 0)
+           or (words[-1][1] if words else 0))
+    # ---- هاوکاتکردنی کات: ئەگەر کاتی وشەکان بەردەستە (وردترین ڕێگا) —
+    # هەر ژێرنووسێک ڕێک لە چرکەی قسەکردنی خۆی دادەنرێت؛
+    # ئەگینا ڕێگای کۆن (یەکخستن + دابەشکردنی ڕێژەیی).
+    if len(words) >= 3:
+        cues = split_long_cues(cues_from_words(words))
+    else:
+        cues = split_long_cues(merge_cues(segs))
     tg_send(chat, MSG_TRANSCRIBED.format(lang=lang, dur=fmt_dur(dur), n=len(cues)))
     texts = [c[2] for c in cues]
     outs, nfail = translate_map_safe(texts)
