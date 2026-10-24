@@ -11,6 +11,8 @@
 #        دەنگ -> نووسین (faster-whisper) -> وەرگێڕان -> SRT + Word + PDF بە سۆرانی
 #        + ژێرنووسی کوردی ڕاستەوخۆ لەسەر ڤیدیۆکە دادەنرێت (burn-in بە ffmpeg/libass)
 #   - بزوێنەری وەرگێڕان: Google Translate (بەخۆڕایی) + GLM/Z.ai (یەدەگ)
+#   - هاوکات: چەند داواکاری بە یەک کات قبوڵ دەکرێت — تا MAX_CONCURRENT_JOBS
+#     بە هاوکات جێبەجێ دەکرێن و ئەوانی تر لە ڕیزدا دادەنرێن (هیچ داواکارییەک ڕەت نابێتەوە)
 #   - لە GitHub Actions ٢٤/٧ کار دەکات: هەر خولێک ٤٥ خولەکە و لە کۆتایی خولێکی نوێ
 #     خۆکارانە دەست پێدەکات (زنجیرەی بێکۆتایی) + cron ی پاشەکەوت هەر ١٠ خولەک
 #
@@ -28,6 +30,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import traceback
 from concurrent.futures import ThreadPoolExecutor
@@ -55,6 +58,10 @@ TG_BOTAPI_CONTAINER = (os.getenv("TG_BOTAPI_CONTAINER") or "botapi").strip()  # 
 LOCAL_BOT_API     = ("localhost" in TG_BASE) or ("127.0.0.1" in TG_BASE)
 RUN_SECONDS       = env_int("RUN_SECONDS", 2700)     # ماوەی خولی polling (بنەڕەت ٤٥ خولەک)
 IDLE_EXIT_SECONDS = env_int("IDLE_EXIT_SECONDS", 0)  # 0 = لەکارخراو — بۆت تا کۆتایی خول ئۆنلاین دەمێنێت
+# --- هاوکاتکردنی داواکارییەکان: چەند کەس بە یەک کات داواکاری بکات، هەموویان وەردەگیرێن ---
+MAX_CONCURRENT_JOBS = max(1, env_int("MAX_CONCURRENT_JOBS", 2))  # چەند داواکاری بە هاوکات جێبەجێ بکرێت
+MAX_QUEUE           = max(0, env_int("MAX_QUEUE", 8))            # زۆرترین ڕیزی چاوەڕوانی (0 = بێ ڕیز)
+JOB_DRAIN_SECONDS   = env_int("JOB_DRAIN_SECONDS", 480)          # کاتی چاوەڕوانی بۆ ئەرکەکان لە کۆتایی خول
 HEAVY_BUDGET      = env_int("HEAVY_BUDGET", 2400)    # زۆرترین کات بۆ یەک ڤیدیۆ/دەنگ (چرکە)
 MAX_VIDEO_MINUTES = env_int("MAX_VIDEO_MINUTES", 0)  # 0 = بێ سنوور
 BURN_SUBTITLES    = env_int("BURN_SUBTITLES", 1)     # 1 = ژێرنووسی کوردی لەسەر ڤیدیۆ دادەنرێت
@@ -108,6 +115,8 @@ WELCOME = (
     "• ڤیدیۆ یان دەنگ بنێری (فایل)، یان لینکی YouTube / Facebook / TikTok — دەنگەکە دەخوێنمەوە،\n"
     "  وەریدەگێڕم و بە فایلی SRT و Word و PDF دەینێرم + ژێرنووسی کوردی لەسەر ڤیدیۆکە دادەنێم.\n"
     "• ئەگەر ڤیدیۆکە لە ٢٠ مێگابایت گەورەتر بوو، بۆ خوار ٢٠ مێگابایت بچووکی دەکەمەوە.\n"
+    "• چەند داواکاری بە یەک کات قبوڵ دەکرێت: هەر کەسێک داواکاری بکات یەکسەر وەردەگیرێت،\n"
+    "  ئەوانی تر لە ڕیزدا دادەنرێن — پێویست ناکات چاوەڕوانی داواکاریی کەسی تر بمێنێتەوە.\n"
     "• دەنگی کوردی سۆرانی لەسەر ڤیدیۆ (ئارەزوومەندانە): /voice_on بۆ چالاککردن،\n"
     "  /voice_off بۆ ناچالاککردن — /voice بۆ زانینی دۆخ.\n"
     "\n"
@@ -150,6 +159,10 @@ MSG_UNSUPPORTED = ("ئەم جۆرە پەیام/فایلە پشتگیری نەک�
                    "پشتگیریکراو: PDF، Word (docx)، PowerPoint (pptx)، TXT، SRT، "
                    "ڤیدیۆ، دەنگ، لینکی ڤیدیۆ، یان دەقی ئاسایی.")
 MSG_ALREADY     = "ئەم دەقە پێشتر سۆرانییە یان پێویستی بە وەرگێڕان نییە."
+MSG_QUEUED      = ("داواکارییەکەتان وەرگیرا — ئێستا {n} داواکاری تر لەپێشتانن لە ڕیزدا.\n"
+                   "خۆکارانە دوای تەواوبوونیان دەست پێدەکات و وەڵامەکان بە ڕیز بۆتان دەنێردرێتەوە.")
+MSG_QUEUE_FULL  = ("بەداخەوە ڕیزەکە پڕە ({n} داواکاری لە چاوەڕوانیدان).\n"
+                   "تکایە دوای ٣ تا ٥ خولەک دووبارە داواکارییەکە بنێرەوە.")
 ERR_LINK        = ("نەتوانم ڤیدیۆکە لەم لینکە دابگرم. لەوانەیە ماڵپەڕەکە ڕێگری لە سێرڤەرەکان بکات "
                    "(بەتایبەتی YouTube لە ئایپییەکانی GitHub).\n"
                    "چارەسەر: دووبارە هەوڵ بدە، یان ڤیدیۆکە دابگرە و وەکو فایل بنێرە (تا ٢٠ مێگابایت).")
@@ -534,11 +547,15 @@ def load_state():
         return {"offset": 0}
 
 
+_STATE_LOCK = threading.RLock()    # دەستگەیشتنی ساغ بۆ state — چەند thread بە یەک کات
+
+
 def save_state(state):
-    tmp = STATE_FILE + ".tmp"
-    with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(state, fh)
-    os.replace(tmp, STATE_FILE)
+    with _STATE_LOCK:
+        tmp = STATE_FILE + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(state, fh)
+        os.replace(tmp, STATE_FILE)
 
 
 # -------------------------- وەرگێڕان ---------------------------------
@@ -1955,15 +1972,28 @@ def tg_send_video(chat, path, caption=None):
 
 
 _whisper_model = None
+_whisper_lock = threading.Lock()    # بارکردنی مۆدێل تەنها یەک جار — بێ کێشە لەگەڵ چەند thread
 _HARD_DEADLINE = None   # کۆتایی کاتی خول — لە main() دادەنرێت (بۆ ڕاوەستاندنی ئەرکی قورس)
 
 
 def get_whisper():
+    """مۆدێلی Whisper — thread-safe بار دەکرێت و بە چەند worker کاردەکات بۆ ئەوەی
+    چەند داواکاری بە یەک کات بگۆترێن (num_workers = MAX_CONCURRENT_JOBS)."""
     global _whisper_model
     if _whisper_model is None:
-        from faster_whisper import WhisperModel
-        log.info("loading whisper model: %s", WHISPER_MODEL)
-        _whisper_model = WhisperModel(WHISPER_MODEL, device="cpu", compute_type="int8")
+        with _whisper_lock:
+            if _whisper_model is None:
+                from faster_whisper import WhisperModel
+                log.info("loading whisper model: %s (num_workers=%d)",
+                         WHISPER_MODEL, MAX_CONCURRENT_JOBS)
+                try:
+                    _whisper_model = WhisperModel(
+                        WHISPER_MODEL, device="cpu", compute_type="int8",
+                        num_workers=max(1, MAX_CONCURRENT_JOBS))
+                except TypeError:
+                    # وەشانی کۆنی faster-whisper — پارامەتری num_workers نییە
+                    _whisper_model = WhisperModel(WHISPER_MODEL, device="cpu",
+                                                  compute_type="int8")
     return _whisper_model
 
 
@@ -2434,17 +2464,23 @@ def handle_command(text, chat, state):
     parts = text.split()
     cmd = (parts[0] if parts else "").split("@")[0].lower()
     is_dict = isinstance(state, dict)
-    voice = state.setdefault("voice", {}) if is_dict else {}
+    if is_dict:
+        # گۆڕکاریی state لەژێر قوفڵدا — چونکە چەند داواکاری بە یەک کات کار دەکەن
+        with _STATE_LOCK:
+            voice = state.setdefault("voice", {})
+            if cmd in ("/voice_on", "/deng_on", "/voiceon", "/dengon"):
+                voice[str(chat)] = True
+                save_state(state)
+            elif cmd in ("/voice_off", "/deng_off", "/voiceoff", "/dengoff"):
+                voice[str(chat)] = False
+                save_state(state)
+            voice = state.get("voice") or {}
+    else:
+        voice = {}
     if cmd in ("/voice_on", "/deng_on", "/voiceon", "/dengon"):
-        if is_dict:
-            voice[str(chat)] = True
-            save_state(state)
         tg_send(chat, MSG_VOICE_ON if tts_available() else MSG_TTS_NOKEY)
         return True
     if cmd in ("/voice_off", "/deng_off", "/voiceoff", "/dengoff"):
-        if is_dict:
-            voice[str(chat)] = False
-            save_state(state)
         tg_send(chat, MSG_VOICE_OFF)
         return True
     if cmd in ("/voice", "/deng", "/voice_status", "/settings"):
@@ -2509,6 +2545,93 @@ def process_update(u, workdir, state=None):
         shutil.rmtree(task_dir, ignore_errors=True)
 
 
+# ------------------- هاوکاتکردنی داواکارییەکان ------------------------
+#  داواکارییەکان بە چەند کرێکار (thread) جێبەجێ دەکرێن:
+#   • تا MAX_CONCURRENT_JOBS داواکاری بە هاوکات جێبەجێ دەکرێن.
+#   • ئەوانی تر لە ڕیزدا دادەنرێن (MAX_QUEUE) و خۆکارانە دوای ئەوان دەست پێدەکەن —
+#     بەکارهێنەر پەیامی شوێنی خۆی لە ڕیزدا وەردەگرێت.
+#   • ئەگەر ڕیزەکە پڕ بوو، پەیامی «دواتر هەوڵ بدەوە» دەنێردرێت.
+#  بەم شێوەیە کاتێک ڤیدیۆیەک پڕۆسێس دەکرێت، داواکارییەکانی ئەوانی تر
+#  یەکسەر وەردەگیرێن — هیچ کەس ناچار نییە چاوەڕوانی تەواوبوونی کەسی تر بێت.
+
+_job_lock    = threading.Lock()
+_job_active  = 0        # داواکارییە قبوڵکراوەکان (کاریگەر + ئەوانەی بەم زووانە دەست پێدەکەن)
+_job_waiting = 0        # ژمارەی ئەوانەی لە ڕیزدا چاوەڕوانن
+_POOL        = ThreadPoolExecutor(max_workers=MAX_CONCURRENT_JOBS,
+                                  thread_name_prefix="job")
+
+
+def jobs_pending():
+    with _job_lock:
+        return _job_active + _job_waiting
+
+
+def _run_job(u, workdir, state, was_waiting=False):
+    global _job_active, _job_waiting
+    if was_waiting:
+        # ئەم ئەرکە لە ڕیزەوە هاتووە — ئێستا شوێنێکی کرێکارانی خۆی داگیر دەکات
+        with _job_lock:
+            _job_active += 1
+            _job_waiting -= 1
+    try:
+        log.info("job running: update %s (active=%d, waiting=%d)",
+                 u.get("update_id"), _job_active, _job_waiting)
+        process_update(u, workdir, state)
+        log.info("job finished: update %s", u.get("update_id"))
+    finally:
+        with _job_lock:
+            _job_active -= 1
+
+
+def dispatch_update(u, workdir, state):
+    """داواکارییەکە دەنێرێتە ناو ڕیز — True ئەگەر قبوڵ کرا.
+    ئەگەر هەموو کرێکارەکان سەرقال بن: پەیامی شوێنی ڕیز دەنێردرێت؛
+    ئەگەر ڕیزەکەش پڕ بوو: پەیامی «دواتر هەوڵ بدەوە» دەنێردرێت."""
+    global _job_active, _job_waiting
+    msg = u.get("message") or {}
+    chat = (msg.get("chat") or {}).get("id")
+    if not chat:
+        return True
+    pos, full = 0, False
+    with _job_lock:
+        if _job_active >= MAX_CONCURRENT_JOBS:
+            if _job_waiting >= MAX_QUEUE:
+                full = True
+            else:
+                _job_waiting += 1
+                pos = _job_waiting
+        else:
+            _job_active += 1        # شوێنێک حیجز دەکرێت — پێش دەستپێکردن
+    if full:
+        log.info("update %s rejected — queue full (%d waiting)",
+                 u.get("update_id"), MAX_QUEUE)
+        _safe_send(chat, MSG_QUEUE_FULL.format(n=MAX_QUEUE))
+        return False
+    if pos:
+        _safe_send(chat, MSG_QUEUED.format(n=pos))
+    try:
+        _POOL.submit(_run_job, u, workdir, state, pos > 0)
+    except RuntimeError as e:
+        with _job_lock:
+            if pos:
+                _job_waiting -= 1     # ئەرکی ڕیزکراو — تەنها waiting زیادکرابوو
+            else:
+                _job_active -= 1      # ئەرکی یەکسەر — شوێنەکە حیجز کرابوو
+        log.warning("dispatch failed (pool closed): %s", e)
+        return False
+    return True
+
+
+def wait_for_jobs(timeout):
+    """چاوەڕوانی بۆ تەواوبوونی هەموو داواکارییەکان — True ئەگەر بەتاڵ بوون."""
+    end = time.time() + max(5, int(timeout))
+    while time.time() < end:
+        if jobs_pending() <= 0:      # <=0 بۆ بەرگری لە هەر ناهەوسەنگییەکی ژمێرەر
+            return True
+        time.sleep(1.0)
+    return jobs_pending() <= 0
+
+
 # ------------------------------ خولی سەرەکی ---------------------------
 
 def self_check():
@@ -2520,6 +2643,7 @@ def self_check():
     print("libreoffice:", shutil.which("soffice") or "missing (ReportLab fallback will be used)")
     print("tesseract OCR:", shutil.which("tesseract") or "missing (scanned PDFs will fail)")
     print("burn subtitles:", ("on, max %d min" % BURN_MAX_MINUTES) if BURN_SUBTITLES else "off")
+    print("concurrency: up to %d parallel job(s), queue up to %d" % (MAX_CONCURRENT_JOBS, MAX_QUEUE))
     print("pdf copy:", "on" if SEND_PDF_COPY else "off")
     print("output video limit:", "%d MB (auto-compress)" % OUT_VIDEO_MAX_MB)
     print("telegram api:", ("LOCAL Bot API server (%s) — files up to 2GB" % TG_BASE)
@@ -2584,16 +2708,35 @@ def main():
         if (not updates and IDLE_EXIT_SECONDS > 0
                 and (time.time() - start) > IDLE_EXIT_SECONDS):
             break
+        accepted = 0
         for u in updates:
             try:
-                process_update(u, workdir, state)
+                if dispatch_update(u, workdir, state):
+                    accepted += 1
             except Exception:
-                log.error("process_update crashed:\n%s", traceback.format_exc())
+                log.error("dispatch_update crashed:\n%s", traceback.format_exc())
             state["offset"] = u["update_id"] + 1
+            log.info("dispatched update %s", u["update_id"])
+        if updates:
             save_state(state)
-            log.info("processed update %s", u["update_id"])
+            log.info("dispatched %d/%d update(s) — pending jobs: %d",
+                     accepted, len(updates), jobs_pending())
 
+    # ---- چاوەڕوانی بۆ تەواوبوونی داواکارییە ماوەکان پێش کۆتایی خول ----
+    if jobs_pending():
+        log.info("cycle ended — waiting up to %ss for %d job(s)...",
+                 JOB_DRAIN_SECONDS, jobs_pending())
+    drained = wait_for_jobs(JOB_DRAIN_SECONDS)
     save_state(state)
+    if not drained:
+        log.warning("jobs still running at cycle end — exiting now "
+                    "(next cycle starts automatically via Actions)")
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass
+        os._exit(0)     # خولی نوێ لە Actions دەست پێدەکات — ڕیزەکە لەدەست ناچێت
     shutil.rmtree(workdir, ignore_errors=True)
     log.info("bot cycle finished")
 
