@@ -136,6 +136,7 @@ jobs:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
           GLM_API_KEY: ${{ secrets.ZAI_API_KEY }}
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
+          YT_CLIENTS: ${{ vars.YT_CLIENTS || 'default,android_vr,web_safari,tv,web_embedded' }}
           WHISPER_MODEL: ${{ vars.WHISPER_MODEL }}
           MAX_VIDEO_MINUTES: ${{ vars.MAX_VIDEO_MINUTES }}
           MAX_CONCURRENT_JOBS: "2"   # چەند داواکاری بە هاوکات جێبەجێ بکرێت (repo ی گشتی ٤ vCPU — دەکرێت ٣)
