@@ -1,42 +1,82 @@
 # =====================================================================
-#  بۆتی وەرگێڕی کوردی سۆرانی — خولی GitHub Actions
-#  هەر ٥ خولەک بۆتەکە چێکی پەیامە نوێیەکان دەکات و دواتر ڕادەوەستێت.
+#  بۆتی وەرگێڕی کوردی سۆرانی — کارکردنی بەردەوام ٢٤/٧ لە GitHub Actions
+#  -------------------------------------------------------------------
+#  چۆن کار دەکات؟
+#   • هەر خولێک ٤٥ خولەکە — بۆتەکە بە بەردەوامی (long polling) پەیامەکان
+#     وەردەگرێت و زۆر بە خێرایی وەڵام دەداتەوە.
+#   • لە کۆتایی هەر خولێک، خولێکی نوێ خۆکارانە دەست پێدەکات
+#     (زنجیرەی بێکۆتایی) — بۆیە بۆتەکە هەمیشە ئۆنلاینە.
+#   • cron ی هەر ١٠ خولەک تەنها وەکو پاشەکەوت (backup) کار دەکات
+#     ئەگەر زنجیرەکە بپچڕێت.
+#   • concurrency دڵنیا دەکات کە تەنها یەک خول بە یەک کات کار بکات.
 # =====================================================================
 
 name: Sorani Translator Bot
 
 on:
   schedule:
-    - cron: "*/5 * * * *"     # هەر ٥ خولەک (کاتی UTC)
-  workflow_dispatch: {}        # بۆ کارپێکردنی دەستی (یەکەم جار)
+    - cron: "*/10 * * * *"    # تەنها backup — زنجیرەی سەرەکی خۆی خول دروست دەکات
+  workflow_dispatch: {}        # کارپێکردنی دەستی + خۆ-دووبارەکردنەوەی زنجیرە
 
 permissions:
   contents: read
+  actions: write              # بۆ trigger کردنی خولی نوێ (gh workflow run)
 
 concurrency:
   group: sorani-bot
-  cancel-in-progress: false
+  cancel-in-progress: false   # خولی چاوەڕوان لەدوای یەک دەست پێدەکەن
 
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 35
+    timeout-minutes: 60
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Skip if another run is active (لادانی خولە زیادەکان)
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          q=$(gh run list --workflow=bot.yml --status=queued --limit 50 --json databaseId --jq 'length')
+          r=$(gh run list --workflow=bot.yml --status=in_progress --limit 50 \
+              --json databaseId --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID)] | length")
+          total=$(( ${q:-0} + ${r:-0} ))
+          echo "active runs (excluding this one): $total"
+          if [ "$total" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Set up Python
+        if: steps.guard.outputs.skip != 'true'
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
           cache: pip
 
-      - name: Install ffmpeg and Arabic fonts
+      - name: Restore apt archives (cache)
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-cache
+          key: apt-ffmpeg-libreoffice-v1
+
+      - name: Install system packages (ffmpeg + fonts + LibreOffice)
+        if: steps.guard.outputs.skip != 'true'
         run: |
+          mkdir -p ~/apt-cache
+          sudo cp -n ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-core
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            ffmpeg fonts-noto-core libreoffice-writer libreoffice-impress \
+            || sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-core
+          sudo cp -n /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
 
       - name: Restore bot state (Telegram offset)
+        if: steps.guard.outputs.skip != 'true'
         uses: actions/cache/restore@v4
         with:
           path: state.json
@@ -44,18 +84,22 @@ jobs:
           restore-keys: |
             bot-state-
 
-      - name: Restore whisper models
-        uses: actions/cache/restore@v4
+      - name: Cache whisper models
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/cache@v4
         with:
           path: ~/.cache/huggingface
-          key: hf-whisper-${{ runner.os }}-${{ github.run_number }}
+          key: hf-whisper-${{ runner.os }}-${{ vars.WHISPER_MODEL || 'base' }}
           restore-keys: |
             hf-whisper-${{ runner.os }}-
 
       - name: Install dependencies
+        if: steps.guard.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
-      - name: Run bot (polling cycle)
+      - name: Run bot (45-minute polling cycle)
+        id: bot
+        if: steps.guard.outputs.skip != 'true'
         env:
           PYTHONUNBUFFERED: "1"
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
@@ -63,20 +107,40 @@ jobs:
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
           WHISPER_MODEL: ${{ vars.WHISPER_MODEL }}
           MAX_VIDEO_MINUTES: ${{ vars.MAX_VIDEO_MINUTES }}
-          RUN_SECONDS: "240"
-          HEAVY_BUDGET: "1500"
-        run: python bot.py
+          RUN_SECONDS: "2700"
+          IDLE_EXIT_SECONDS: "0"
+          HEAVY_BUDGET: "2400"
+          BURN_SUBTITLES: "1"
+          BURN_MAX_MINUTES: "30"
+          SEND_PDF_COPY: "1"
+        run: |
+          code=0
+          python bot.py || code=$?
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          exit $code
 
       - name: Save bot state
-        if: always()
+        if: always() && steps.guard.outputs.skip != 'true' && hashFiles('state.json') != ''
         uses: actions/cache/save@v4
         with:
           path: state.json
           key: bot-state-${{ github.run_number }}
 
-      - name: Save whisper models
-        if: always()
-        uses: actions/cache/save@v4
-        with:
-          path: ~/.cache/huggingface
-          key: hf-whisper-${{ runner.os }}-${{ github.run_number }}
+      - name: Keep the bot online 24/7 (دەستپێکردنی خولی نوێ)
+        if: >-
+          always() && !cancelled() &&
+          steps.guard.outputs.skip != 'true' &&
+          contains(fromJSON('["success", "failure"]'), steps.bot.outcome) &&
+          steps.bot.outputs.exit != '42'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3; do
+            if gh workflow run bot.yml --ref "${GITHUB_REF_NAME:-main}"; then
+              echo "next cycle triggered — bot stays online"
+              exit 0
+            fi
+            echo "retry $i failed — waiting 20s"
+            sleep 20
+          done
+          echo "::warning::could not trigger next cycle; cron backup will recover within ~10 min"
