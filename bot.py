@@ -108,6 +108,15 @@ class BotError(Exception):
     """هەڵەی دۆستانە: نامەکەی وەکو خۆی بۆ بەکارهێنەر دەنێردرێت."""
 
 
+class TgTooBig(BotError):
+    """تەلەگرام وەڵامی «file is too big» داوەتەوە — بۆ جیاکردنەوە لە هەڵەکانی تر.
+    (زۆرترین: سێرڤەری ناوخۆیی لە دۆخی --local نییە یان فایل بەڕاستی > ٢GB یە)"""
+    def __init__(self, msg, method="", desc=""):
+        super().__init__(msg)
+        self.method = method
+        self.desc = desc
+
+
 # -------------------------- نووسینە کوردییەکان ------------------------
 
 WELCOME = (
@@ -133,6 +142,8 @@ WELCOME = (
 )
 
 PROG_DOWNLOAD   = "چاوەڕێ بکە... ڤیدیۆکە داگیر دەم. (بەپێی قەبارەکەی چەند خولەکێک دەخایەنێت)"
+MSG_LINK_AUDIO_ONLY = ("تێبینی: فۆرماتەکانی ڤیدیۆ بۆ سێرڤەرەکە داخستبوون، بۆیە تەنها دەنگەکە داگیرا — "
+                       "فایلی SRT و Word و PDF بە تەواوی دەنێردرێن؛ ژێرنووس لەسەر ڤیدیۆ نەکرا.")
 MSG_MEDIA_START = "چاوەڕێ بکە... فایلەکە دادەگرم و دەنگەکە دەخوێنمەوە."
 MSG_DOC_START   = "چاوەڕێ بکە... فایلەکە وەرگێڕ دەم. (بۆ فایلە گەورەکان چەند خولەکێک دەخایەنێت)"
 MSG_DOWNLOADED  = "داگیرا: {title}\nماوە: {dur} — ئێستا دەنگ دەخوێنمەوە..."
@@ -180,6 +191,11 @@ def err_link(cause=""):
         msg += ("\n\nهۆکار: یووتیوب پشکنینی مرۆیی لە سێرڤەرەکانی GitHub دەکات.\n"
                 "چارەسەری تەواو: cookies ی یووتیوب بەرهەم بهێنە (بە شێوازی Netscape) و "
                 "وەکو secret بە ناوی YT_COOKIES زیاد بکە — بینی README.")
+    elif ("requested format is not available" in c or "page needs to be reloaded" in c
+          or "no video formats" in c):
+        msg += ("\n\nهۆکار: یووتیوب فۆرماتە داگرتنییەکان بۆ ئایپی سێرڤەرەکە داخستووە (SABR / PO Token).\n"
+                "چارەسەری تەواو: secret ی YT_COOKIES دابنێ — بە cookies بە زۆری کار دەکات (ڕێنمایی لە README).\n"
+                "تێبینی: ئەگەر تەنها دەنگ بگیرێت، SRT و Word و PDF هێشتا بە تەواوی دەنێردرێن.")
     elif "confirm your age" in c or "age" in c and ("restrict" in c or "inappropriate" in c):
         msg += ("\n\nهۆکار: ڤیدیۆکە سنووری تەمەنی هەیە — تەنها بە cookies ی هەژماری یووتیوب دادەگیرێت "
                 "(secret ی YT_COOKIES).")
@@ -205,10 +221,27 @@ def err_too_long():
     return ("ڤیدیۆکە لە سنوورەکە درێژترە (زۆرترین: %d خولەک — MAX_VIDEO_MINUTES).\n"
             "تکایە بەشی بچووکتر بنێرە یان سنوورەکە لە GitHub بگۆڕە."
             % MAX_VIDEO_MINUTES)
-def err_big():
-    """پەیامی فایلی گەورە — بەپێی جۆری خاڵی Telegram."""
+def err_big(method=None, size=None):
+    """پەیامی فایلی گەورە — بەپێی دۆخی ڕاستەقینە:
+    • فایل بەڕاستی لە ٢ گێگابایت گەورەترە → سنووری تەلەگرام + ڕێنمایی.
+    • فایل لەژێر سنوورەکەیە بەڵام getFile ڕەتی کردەوە → سێرڤەری ناوخۆیی لە دۆخی
+      --local نییە (وێنە نوێیەکەی aiogram تەنها env دەناسێت: TELEGRAM_LOCAL=1).
+      method="getFile" + size ≤ TG_MAX_FILE → ئەم لقە."""
     if LOCAL_BOT_API:
-        return "فایلەکە لە ٢ گێگابایت گەورەترە — ئەمە زۆرترین سنووری تەلەگرامە بۆ فایل."
+        over = (int(size or 0) > TG_MAX_FILE)
+        if method == "getFile" and not over:
+            return ("نەتوانم فایلەکە دابگرم — سێرڤەری تەلەگرام داگرتنی فایلی سەرو ٢٠ مێگابایت ڕەت کردەوە.\n"
+                    "\n"
+                    "هۆکار: سێرڤەری ناوخۆیی Bot API لە دۆخی local کار ناکات — وێنە نوێیەکەی "
+                    "telegram-bot-api (Docker) ئیتر پارامەتری --local لە دێڕی فەرمانەکە ناناسێت.\n"
+                    "\n"
+                    "چارەسەر: لە ZIP ەکە bot.yml ی نوێ باربکە و لە .github/workflows/ دایبنێ "
+                    "(وەشانی نوێ TELEGRAM_LOCAL=1 دەنێرێت بۆ سێرڤەرەکە)، پاشان ئەم فایلە دووبارە بنێرەوە.")
+        return ("فایلەکە لە ٢ گێگابایت گەورەترە — ئەمە زۆرترین سنووری تەلەگرامە بۆ فایل.\n"
+                "\n"
+                "چارەسەر:\n"
+                "• لینکی ڤیدیۆکە بنێرە (YouTube / TikTok / Facebook...) — دەیگرم و وەریدەگێڕم.\n"
+                "• یان فایلەکە بکە بە دوو بەش و یەکیەک یەکیەک بنێرە.")
     return ("فایلەکە لە ٢٠ مێگابایت گەورەترە — سنووری داگرتنەوەی تەلەگرامە بۆ بۆتەکان.\n"
             "چارەسەر:\n"
             "• لە GitHub دوو secret زیاد بکە: TG_API_ID و TG_API_HASH (لە my.telegram.org بەخۆڕایین)\n"
@@ -269,7 +302,7 @@ def ts(sec):
 
 # ----------------------------- Telegram ------------------------------
 
-def tg_call(method, payload=None, files=None, timeout=70, api_base=None):
+def tg_call(method, payload=None, files=None, timeout=70, api_base=None, size_hint=None):
     r = SESSION.post((api_base or TG_API) + "/" + method,
                      data=payload, files=files, timeout=timeout)
     try:
@@ -279,7 +312,8 @@ def tg_call(method, payload=None, files=None, timeout=70, api_base=None):
     if not j.get("ok"):
         desc = j.get("description") or ("http %s" % r.status_code)
         if "too big" in desc.lower():
-            raise BotError(err_big())
+            raise TgTooBig(err_big(method=method, size=size_hint),
+                           method=method, desc=desc)
         raise BotError("Telegram: " + desc)
     return j.get("result")
 
@@ -470,11 +504,20 @@ def _download_to(url, path, timeout=600):
     return os.path.getsize(path) > 0
 
 
-def tg_download(file_id, workdir, name_hint="file"):
-    f = tg_call("getFile", {"file_id": file_id}, timeout=60)
+def tg_download(file_id, workdir, name_hint="file", size_hint=0):
+    # getFile: ئەگەر «file is too big» هات و فایل لەژێر ٢GB یە → سێرڤەر لە دۆخی local نییە.
+    # یەک هەوڵی دووبارە (بۆ حاڵەتی کاتی)، پاشان TgTooBig سەر دەچێت — نامە ڕاستگۆکە.
+    try:
+        f = tg_call("getFile", {"file_id": file_id}, timeout=60, size_hint=size_hint)
+    except TgTooBig as e:
+        log.error("getFile refused ('%s') — local Bot API server is NOT running in "
+                  "--local mode; bot.yml must pass env TELEGRAM_LOCAL=1 "
+                  "(new aiogram image ignores CLI args)", e.desc)
+        time.sleep(4)
+        f = tg_call("getFile", {"file_id": file_id}, timeout=60, size_hint=size_hint)
     size = int(f.get("file_size") or 0)
     if size > TG_MAX_FILE:
-        raise BotError(err_big())
+        raise BotError(err_big(size=size))
     ext = os.path.splitext(f.get("file_path") or "")[1] or ""
     path = os.path.join(workdir, sanitize(name_hint) + ext)
 
@@ -504,7 +547,8 @@ def tg_download(file_id, workdir, name_hint="file"):
         if attempt:
             time.sleep(2 * attempt)
             try:
-                f = tg_call("getFile", {"file_id": file_id}, timeout=60) or f
+                f = tg_call("getFile", {"file_id": file_id}, timeout=60,
+                            size_hint=size_hint) or f
             except Exception as e:
                 log.warning("getFile retry %d failed: %s", attempt + 1, e)
         fp = f.get("file_path")
@@ -2179,13 +2223,15 @@ def build_transcript_docx(cues, texts, out_path, title=""):
     doc.save(out_path)
 
 
-def _ytdl_base_opts(workdir):
+def _ytdl_base_opts(workdir, fmt=None):
     """ئۆپشنە بنەڕەتییەکانی yt-dlp — بۆ هەموو هەوڵەکان."""
     import yt_dlp
     import yt_dlp.utils
+    if not fmt:
+        fmt = ("best[height<=720]+bestaudio/best[height<=720]/bestaudio/best"
+               if BURN_SUBTITLES else "bestaudio/best")  # ڤیدیۆ پێویستە بۆ ژێرنووس
     opts = {
-        "format": ("best[height<=720]+bestaudio/best[height<=720]/bestaudio/best"
-                   if BURN_SUBTITLES else "bestaudio/best"),  # ڤیدیۆ پێویستە بۆ ژێرنووس
+        "format": fmt,
         "outtmpl": os.path.join(workdir, "src.%(ext)s"),
         "noplaylist": True,
         "quiet": True,
@@ -2233,30 +2279,86 @@ def _ytdl_extract(url, workdir, opts):
     return path, title, duration
 
 
-def ytdl_download(url, workdir):
-    """داگرتنی ڤیدیۆ لە لینک — بە چەند کلیێنتی جیاواز هەوڵ دەدرێت.
-    یووتیوب لە ئایپییەکانی GitHub زۆر جار کلیێنتی بنەڕەتی ڕەت دەکاتەوە
-    («Sign in to confirm you're not a bot») — بەڵام کلیێنتی android_vr /
-    tv / web_embedded (بێ PO Token) زۆر جار دەپەڕن. یەکەم دانەی سەرکەوتوو."""
-    errors = []
+def _is_format_err(text):
+    """ئایا هەڵەکە «فۆرمات بەردەست نییە»یە؟
+    یووتیوب بە SABR/PO Token فۆرماتە داگرتنییەکان بۆ ئایپی سێرڤەرەکان دەخات —
+    extraction سەرکەوتووە بەڵام هیچ فۆرماتێکی داگرتنی نامێنێتەوە."""
+    t = (text or "").lower()
+    return ("requested format is not available" in t
+            or "no video formats" in t
+            or "page needs to be reloaded" in t)
+
+
+def _log_available_formats(url, client, probe):
+    """دیagnostics: لیستی فۆرماتەکانی ڕاپۆرتکراو بۆ لۆگی Actions (تەنها یەک جار)."""
+    if probe.get("done"):
+        return
+    probe["done"] = True
+    try:
+        import yt_dlp
+        opts = {"quiet": True, "no_warnings": True, "socket_timeout": 20,
+                "noplaylist": True}
+        if client and client != "default":
+            opts["extractor_args"] = {"youtube": {"player_client": [client]}}
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=False)
+        fmts = info.get("formats") or []
+        rows = []
+        for f in fmts[:14]:
+            rows.append("id=%s ext=%s h=%s proto=%s %s" % (
+                f.get("format_id"), f.get("ext"), f.get("height"),
+                f.get("protocol"), (f.get("format_note") or "")))
+        log.info("yt-dlp probe [%s]: %d format(s) reported\n  %s",
+                 client, len(fmts), "\n  ".join(rows) if rows else "(no formats listed)")
+    except Exception as e:
+        msg = str(e).splitlines()[0][:200] if str(e) else repr(e)
+        log.info("yt-dlp probe [%s] failed: %s", client, msg)
+
+
+def _ytdl_attempt_chain(url, workdir, fmt, errors, probe):
+    """یەک خول — بۆ هەموو کلیێنتەکان هەوڵ دەدرێت بە فۆرماتی دیاریکراو. None = هەموویان شکا."""
     for i, client in enumerate(YT_CLIENTS):
-        opts = dict(_ytdl_base_opts(workdir))
+        opts = dict(_ytdl_base_opts(workdir, fmt))
         if client and client != "default":
             opts["extractor_args"] = {"youtube": {"player_client": [client]}}
         try:
             out = _ytdl_extract(url, workdir, opts)
-            if i > 0 or client != "default":
-                log.info("yt-dlp: success with client '%s' for %s", client, url)
+            log.info("yt-dlp: success with client '%s' for %s", client, url)
             return out
         except BotError:
             raise                      # هەڵەی دۆستانە (وەکو ڤیدیۆی درێژ) — دووبارەی نەکەوە
         except Exception as e:
             err = str(e) or repr(e)
-            errors.append("[%s] %s" % (client, err.splitlines()[0][:220] if err else err))
+            first = err.splitlines()[0][:220] if err else err
+            errors.append("[%s] %s" % (client, first))
             log.warning("yt-dlp [%s] failed for %s: %s", client, url,
                         err.splitlines()[0][:300] if err else err)
+            if _is_format_err(err):
+                _log_available_formats(url, client, probe)
             if i < len(YT_CLIENTS) - 1:
                 time.sleep(1.0)        # کەمێک چاوەڕێ بکە — نەک لە یەک چرکەدا چەند داواکاری
+    return None
+
+
+def ytdl_download(url, workdir):
+    """داگرتنی لینک — ٥ کلیێنت × ٢ خول (ڤیدیۆ، پاشان تەنها دەنگ).
+    یووتیوب لە ئایپییەکانی GitHub زۆر جار: ① کلیێنتی بنەڕەتی ڕەت دەکات
+    («Sign in to confirm you're not a bot») ② یان فۆرماتەکان دەخات
+    («Requested format is not available» — SABR/PO Token).
+    خولی دووەم تەنها دەنگ دەگرێت — SRT و Word و PDF هێشتا بە تەواوی دەنێردرێن
+    (تەنها ژێرنووس لەسەر ڤیدیۆ ناکرێت). (path, title, duration, audio_only) دەگەڕێنێتەوە."""
+    fmt_video = ("best[height<=720]+bestaudio/best[height<=720]/bestaudio/best"
+                 if BURN_SUBTITLES else "bestaudio/best")
+    probe = {}
+    errors = []
+    out = _ytdl_attempt_chain(url, workdir, fmt_video, errors, probe)
+    if out:
+        return out + (False,)
+    if fmt_video != "bestaudio/best" and any(_is_format_err(e) for e in errors):
+        log.info("yt-dlp: no video formats from any client — trying audio-only fallback for %s", url)
+        out = _ytdl_attempt_chain(url, workdir, "bestaudio/best", errors, probe)
+        if out:
+            return out + (True,)
     raise BotError(err_link(" | ".join(errors)))
 
 
@@ -2411,10 +2513,11 @@ def handle_document_file(tg_file, name, chat, workdir):
     kind = route_document(name, tg_file.get("mime_type") or "")
     if not kind:
         raise BotError(MSG_UNSUPPORTED)
-    if int(tg_file.get("file_size") or 0) > TG_MAX_FILE:
-        raise BotError(err_big())
+    size = int(tg_file.get("file_size") or 0)
+    if size > TG_MAX_FILE:
+        raise BotError(err_big(size=size))
     tg_send(chat, MSG_DOC_START)
-    path = tg_download(tg_file["file_id"], workdir, name)
+    path = tg_download(tg_file["file_id"], workdir, name, size_hint=size)
     with open(path, "rb") as fh:
         data = fh.read()
     stem = sanitize(os.path.splitext(os.path.basename(name))[0]) or "file"
@@ -2501,10 +2604,11 @@ def handle_document_file(tg_file, name, chat, workdir):
 
 
 def handle_media_file(tg_file, chat, workdir, name_hint="media", state=None):
-    if int(tg_file.get("file_size") or 0) > TG_MAX_FILE:
-        raise BotError(err_big())
+    size = int(tg_file.get("file_size") or 0)
+    if size > TG_MAX_FILE:
+        raise BotError(err_big(size=size))
     tg_send(chat, MSG_MEDIA_START)
-    path = tg_download(tg_file["file_id"], workdir, name_hint)
+    path = tg_download(tg_file["file_id"], workdir, name_hint, size_hint=size)
     run_speech_pipeline(path, chat, workdir, state)
 
 
@@ -2512,7 +2616,7 @@ def handle_link(url, chat, workdir, state=None):
     tg_action(chat, "typing")
     tg_send(chat, PROG_DOWNLOAD)
     try:
-        src_path, title, duration = ytdl_download(url, workdir)
+        src_path, title, duration, audio_only = ytdl_download(url, workdir)
     except BotError:
         raise
     except Exception as e:
@@ -2521,6 +2625,8 @@ def handle_link(url, chat, workdir, state=None):
     msg = "داگیرا: %s" % title[:120]
     if duration:
         msg += "\nماوە: %s" % fmt_dur(duration)
+    if audio_only:
+        msg += "\n\n%s" % MSG_LINK_AUDIO_ONLY
     tg_send(chat, msg)
     run_speech_pipeline(src_path, chat, workdir, state)
 
@@ -2721,7 +2827,8 @@ def self_check():
     print("concurrency: up to %d parallel job(s), queue up to %d" % (MAX_CONCURRENT_JOBS, MAX_QUEUE))
     print("pdf copy:", "on" if SEND_PDF_COPY else "off")
     print("output video limit:", "%d MB (auto-compress)" % OUT_VIDEO_MAX_MB)
-    print("telegram api:", ("LOCAL Bot API server (%s) — files up to 2GB" % TG_BASE)
+    print("telegram api:", ("LOCAL Bot API server (%s) — files up to 2GB "
+          "(server must run with --local / env TELEGRAM_LOCAL=1)" % TG_BASE)
           if LOCAL_BOT_API else "official api.telegram.org — downloads up to 20MB")
     print("kurdish tts:", ("on, speaker=%s" % TTS_SPEAKER) if TTS_API_KEY
           else "off (set KURDISH_TTS_API_KEY secret)")
