@@ -138,6 +138,8 @@ jobs:
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
           WHISPER_MODEL: ${{ vars.WHISPER_MODEL }}
           MAX_VIDEO_MINUTES: ${{ vars.MAX_VIDEO_MINUTES }}
+          MAX_CONCURRENT_JOBS: "2"   # چەند داواکاری بە هاوکات جێبەجێ بکرێت (repo ی گشتی ٤ vCPU — دەکرێت ٣)
+          MAX_QUEUE: "8"             # زۆرترین ڕیزی چاوەڕوانی پێش پەیامی «ڕیزەکە پڕە»
           RUN_SECONDS: "2700"
           IDLE_EXIT_SECONDS: "0"
           HEAVY_BUDGET: "2400"
