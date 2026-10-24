@@ -51,6 +51,7 @@ TG_BASE           = (os.getenv("TG_API_BASE") or "https://api.telegram.org").str
 TG_FILE_BASE      = (os.getenv("TG_FILE_BASE") or TG_BASE).strip().rstrip("/")
 TG_CLOUD_BASE     = "https://api.telegram.org"          # پاشەکەوتی فەرمی — بۆ فایلی ≤ ٢٠MB
 TG_DATA_DIR       = (os.getenv("TG_DATA_DIR") or "").strip()  # فۆڵدەری داتای سێرڤەری ناوخۆیی لەسەر ڕەسەن (mount)
+TG_BOTAPI_CONTAINER = (os.getenv("TG_BOTAPI_CONTAINER") or "botapi").strip()  # ناوی کۆنتەینەری سێرڤەری ناوخۆیی
 LOCAL_BOT_API     = ("localhost" in TG_BASE) or ("127.0.0.1" in TG_BASE)
 RUN_SECONDS       = env_int("RUN_SECONDS", 2700)     # ماوەی خولی polling (بنەڕەت ٤٥ خولەک)
 IDLE_EXIT_SECONDS = env_int("IDLE_EXIT_SECONDS", 0)  # 0 = لەکارخراو — بۆت تا کۆتایی خول ئۆنلاین دەمێنێت
@@ -300,6 +301,110 @@ def _local_file_candidates(f):
     return out
 
 
+def _disk_find_by_walk(f, root):
+    """ئەگەر ڕێڕەوە ئەگومانییەکان نەدۆزرانەوە (layout ی سێرڤەرەکە جیاوازە)،
+    بە ناو + قەبارە لەناو tgdata دەیگەڕێین."""
+    fp = (f.get("file_path") or "").strip().lstrip("/")
+    if not fp:
+        return []
+    size = int(f.get("file_size") or 0)
+    name = os.path.basename(fp)
+    hits, scanned = [], 0
+    for dirpath, _dirs, filenames in os.walk(root):
+        scanned += len(filenames)
+        if scanned > 5000:
+            log.warning("disk walk stopped: too many files in %s", root)
+            break
+        if name not in filenames:
+            continue
+        p = os.path.join(dirpath, name)
+        try:
+            sz = os.path.getsize(p)
+        except OSError:
+            continue
+        if sz <= 0:
+            continue
+        score = ((1 if p.endswith("/" + fp) else 0),
+                 (1 if (size and sz == size) else 0))
+        hits.append((score, p))
+    hits.sort(reverse=True)
+    return [p for _s, p in hits]
+
+
+def _docker_find_and_copy(f, path):
+    """چارەسەری زیادە بۆ tdlib #742 کاتێک mount نییە (bot.yml ی کۆن):
+    فایلەکە لەناو کۆنتەینەری سێرڤەری ناوخۆیی دەدۆزینەوە و بە docker cp دەرهێنە.
+    لەسەر GitHub Actions دا docker بۆ runner بەردەستە."""
+    if not LOCAL_BOT_API:
+        return False
+    fp = (f.get("file_path") or "").strip()
+    if not fp:
+        return False
+    name = os.path.basename(fp)
+    size = int(f.get("file_size") or 0)
+    search_roots = ["/var/lib/telegram-bot-api", "/"]
+    cands = []
+    for base in search_roots:
+        try:
+            cmd = ["docker", "exec", TG_BOTAPI_CONTAINER, "find", base,
+                   "-type", "f", "-name", name]
+            if base == "/":
+                cmd += ["-not", "-path", "/proc/*", "-not", "-path", "/sys/*"]
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            if res.returncode == 0 and res.stdout:
+                cands = [l.strip() for l in res.stdout.splitlines() if l.strip()]
+                break
+        except FileNotFoundError:
+            log.warning("docker route unavailable: docker not found on host")
+            return False
+        except Exception as e:
+            log.warning("docker find failed (%s): %s", base, e)
+    if not cands:
+        return False
+
+    # ڕیزبەندی: ڕێڕەوی تەواو یەکخستوو + قەبارەی گونجاو — بەبێ کۆپیکردنی هەڵە
+    scored = []
+    for p in cands[:6]:
+        rel_match = 1 if (fp.lstrip("/") and p.endswith("/" + fp.lstrip("/"))) else 0
+        sz = -1
+        try:
+            r2 = subprocess.run(["docker", "exec", TG_BOTAPI_CONTAINER,
+                                 "wc", "-c", p],
+                                capture_output=True, text=True, timeout=30)
+            if r2.returncode == 0 and r2.stdout:
+                sz = int(r2.stdout.split()[0])
+        except Exception:
+            sz = -1
+        size_match = 1 if (size and sz == size) else 0
+        scored.append((rel_match + size_match, size_match, sz, p))
+    scored.sort(reverse=True)
+
+    for _s, _sm, sz, p in scored:
+        if size and sz not in (-1, size):
+            continue                      # قەبارە ناگونجێت — فایلی هەڵەیە
+        tmp_out = path + ".dl"
+        try:
+            r3 = subprocess.run(["docker", "cp",
+                                 "%s:%s" % (TG_BOTAPI_CONTAINER, p), tmp_out],
+                                capture_output=True, text=True, timeout=900)
+            if r3.returncode == 0 and os.path.isfile(tmp_out) and \
+                    os.path.getsize(tmp_out) > 0 and \
+                    (not size or os.path.getsize(tmp_out) == size):
+                shutil.move(tmp_out, path)
+                log.info("downloaded via docker cp from %s:%s", TG_BOTAPI_CONTAINER, p)
+                return True
+            if os.path.exists(tmp_out):
+                os.remove(tmp_out)
+        except Exception as e:
+            log.warning("docker cp failed for %s: %s", p, e)
+            if os.path.exists(tmp_out):
+                try:
+                    os.remove(tmp_out)
+                except OSError:
+                    pass
+    return False
+
+
 def _download_to(url, path, timeout=600):
     """داگرتن بە stream — بۆ فایلی گەورە (تا ٢GB) بێ خواردنی RAM."""
     with SESSION.get(url, timeout=timeout, stream=True) as r:
@@ -322,7 +427,12 @@ def tg_download(file_id, workdir, name_hint="file"):
     path = os.path.join(workdir, sanitize(name_hint) + ext)
 
     # ---- ١) خوێندنەوەی ڕاستەوخۆ لە دیسک (mount ی tgdata) — خێراترین و پتەوترین ڕێگا ----
-    for cand in _local_file_candidates(f):
+    cands = _local_file_candidates(f)
+    if TG_DATA_DIR and os.path.isdir(TG_DATA_DIR):
+        for extra in _disk_find_by_walk(f, TG_DATA_DIR):
+            if extra not in cands:
+                cands.append(extra)
+    for cand in cands:
         try:
             if os.path.isfile(cand) and os.path.getsize(cand) > 0:
                 shutil.copyfile(cand, path)
@@ -331,6 +441,10 @@ def tg_download(file_id, workdir, name_hint="file"):
                 return path
         except OSError as e:
             log.warning("local-disk read failed for %s: %s", cand, e)
+
+    # ---- ١.٥) docker cp — کاتێک mount نییە (bot.yml ی کۆن) یان layout جیاوازە ----
+    if _docker_find_and_copy(f, path):
+        return path
 
     # ---- ٢) داگرتن لە ڕێگەی HTTP — لەگەڵ دووبارەکردنەوە بۆ 404 (getFile ی نوێ هەر جارە) ----
     last_err = None
@@ -367,11 +481,23 @@ def tg_download(file_id, workdir, name_hint="file"):
         except Exception as e:
             log.warning("official API fallback failed: %s", e)
 
-    # ---- ٤) هەموو ڕێگاکان سەرنەچوون ----
+    # ---- ٤) هەموو ڕێگاکان سەرنەچوون — داagnostics بۆ لۆگی Actions ----
+    try:
+        if TG_DATA_DIR and os.path.isdir(TG_DATA_DIR):
+            tops = sorted(os.listdir(TG_DATA_DIR))[:6]
+            log.warning("tgdata root contains: %s", tops)
+        else:
+            log.warning("TG_DATA_DIR is empty — bot.yml probably not updated "
+                        "(mount tgdata missing)")
+    except Exception:
+        pass
+    if not TG_DATA_DIR:
+        raise BotError("داگرتنی فایل سەرنەچوو (404). وادیارە **bot.yml ی نوێ** بارنەکراوە — "
+                       "هەردوو فایلی bot.py و .github/workflows/bot.yml لە ZIP ەکە باربکە "
+                       "پاشان دووبارە ڤیدیۆکە بنێرەوە.")
     raise BotError("داگرتنی فایل سەرنەچوو لە سێرڤەری ناوخۆیی Bot API (404). "
-                   "تکایە دووبارە فایلەکە بنێرەوە — ئەگەر دووبارە ڕوویدا، فایلی "
-                   "bot.yml ی نوێ باربکە (mount ی tgdata بۆ چارەسەری کێشەی "
-                   "telegram-bot-api #742).")
+                   "تکایە دووبارە فایلەکە بنێرەوە — ئەگەر دووبارە ڕوویدا، لۆگی "
+                   "Actions ەکە بنێرە بۆ وردبوونی کێشەکە.")
 
 
 def tg_get_updates(offset, timeout=40):
