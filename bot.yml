@@ -1,0 +1,210 @@
+# =====================================================================
+#  بۆتی وەرگێڕی کوردی سۆرانی — کارکردنی بەردەوام ٢٤/٧ لە GitHub Actions
+#  -------------------------------------------------------------------
+#  چۆن کار دەکات؟
+#   • هەر خولێک ٤.٥ کاتژمێرە (270 خولەک) — بۆتەکە بە بەردەوامی (long polling)
+#     پەیامەکان وەردەگرێت و زۆر بە خێرایی وەڵام دەداتەوە.
+#   • خولی درێژ = کارە قورسەکان (ڤیدیۆی درێژ) پێویستیان بە پچڕان نییە —
+#     بودجەی یەک ڤیدیۆ تا ٤ کاتژمێرە (HEAVY_BUDGET).
+#   • لە کۆتایی هەر خولێک، خولێکی نوێ خۆکارانە دەست پێدەکات
+#     (زنجیرەی بێکۆتایی) — بۆیە بۆتەکە هەمیشە ئۆنلاینە.
+#   • cron ی هەر ١٠ خولەک تەنها وەکو پاشەکەوت (backup) کار دەکات
+#     ئەگەر زنجیرەکە بپچڕێت.
+#   • concurrency دڵنیا دەکات کە تەنها یەک خول بە یەک کات کار بکات.
+# =====================================================================
+
+name: Sorani Translator Bot
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"    # تەنها backup — زنجیرەی سەرەکی خۆی خول دروست دەکات
+  workflow_dispatch: {}        # کارپێکردنی دەستی + خۆ-دووبارەکردنەوەی زنجیرە
+
+permissions:
+  contents: write             # بارکردنی فایلە وەرگیراوەکان بۆ فۆڵدەری data/ (GitHub archive)
+  actions: write              # بۆ trigger کردنی خولی نوێ (gh workflow run)
+
+concurrency:
+  group: sorani-bot
+  cancel-in-progress: false   # خولی چاوەڕوان لەدوای یەک دەست پێدەکەن
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 350      # دەبێت لە setup + RUN_SECONDS + drain + ناردنەوە گەورەتر بێت
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Skip if another run is active (لادانی خولە زیادەکان)
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          q=$(gh run list --workflow=bot.yml --status=queued --limit 50 --json databaseId --jq 'length')
+          r=$(gh run list --workflow=bot.yml --status=in_progress --limit 50 \
+              --json databaseId --jq "[.[] | select(.databaseId != $GITHUB_RUN_ID)] | length")
+          total=$(( ${q:-0} + ${r:-0} ))
+          echo "active runs (excluding this one): $total"
+          if [ "$total" -gt 0 ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Set up Python
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Restore apt archives (cache)
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-cache
+          key: apt-ffmpeg-libreoffice-tesseract-v2
+
+      - name: Install system packages (ffmpeg + fonts + LibreOffice + tesseract)
+        if: steps.guard.outputs.skip != 'true'
+        run: |
+          mkdir -p ~/apt-cache
+          sudo cp -n ~/apt-cache/*.deb /var/cache/apt/archives/ 2>/dev/null || true
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
+            ffmpeg fonts-noto-core libreoffice-writer libreoffice-impress \
+            tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng \
+            || sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-core
+          sudo cp -n /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
+
+      - name: Local Bot API server (فایل تا 2GB — بۆ ڤیدیۆی گەورەتر لە 20MB)
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          TG_API_ID: ${{ secrets.TG_API_ID }}
+          TG_API_HASH: ${{ secrets.TG_API_HASH }}
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          if [ -z "$TG_API_ID" ] || [ -z "$TG_API_HASH" ]; then
+            echo "TG_API_ID/TG_API_HASH not set — using official api.telegram.org (20MB download limit)"
+            exit 0
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/tgdata"
+          sudo chmod 777 "$GITHUB_WORKSPACE/tgdata"
+          # گرنگ: وێنە نوێیەکەی aiogram/telegram-bot-api پارامەترەکانی دێڕی فەرمان
+          # (وەکو --local) پشتگوێ دەخات — تەنها env دەناسێت. TELEGRAM_LOCAL=1
+          # فایلەکان دەکاتە ٢GB؛ بەبێ ئەوە getFile بۆ فایلی >20MB «file is too big» دەدات.
+          docker run -d --name botapi -p 8081:8081 \
+            -v "$GITHUB_WORKSPACE/tgdata:/var/lib/telegram-bot-api" \
+            -e TELEGRAM_API_ID="$TG_API_ID" -e TELEGRAM_API_HASH="$TG_API_HASH" \
+            -e TELEGRAM_LOCAL=1 -e TELEGRAM_HTTP_PORT=8081 \
+            aiogram/telegram-bot-api:latest --local --http-port 8081
+          ok=0
+          for i in $(seq 1 30); do
+            sleep 1
+            if curl -s "http://localhost:8081/bot$BOT_TOKEN/getMe" | grep -q '"ok":true'; then ok=1; break; fi
+          done
+          if [ "$ok" = "1" ]; then
+            if ! docker logs botapi 2>&1 | grep -q -- "--local"; then
+              echo "::warning::telegram-bot-api is NOT running in --local mode! Files >20MB will fail. Check TELEGRAM_LOCAL env."
+            fi
+            echo "TG_API_BASE=http://localhost:8081" >> "$GITHUB_ENV"
+            echo "TG_DATA_DIR=$GITHUB_WORKSPACE/tgdata" >> "$GITHUB_ENV"
+            echo "local Bot API ready — download/upload limit now 2GB (files read directly from disk)"
+          else
+            echo "::warning::local Bot API did not start — falling back to official API"
+          fi
+
+      - name: Restore bot state (Telegram offset)
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/cache/restore@v4
+        with:
+          path: state.json
+          key: bot-state-${{ github.run_number }}
+          restore-keys: |
+            bot-state-
+
+      - name: Cache whisper models
+        if: steps.guard.outputs.skip != 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-whisper-${{ runner.os }}-${{ vars.WHISPER_MODEL || 'base' }}
+          restore-keys: |
+            hf-whisper-${{ runner.os }}-
+
+      - name: Install dependencies
+        if: steps.guard.outputs.skip != 'true'
+        run: pip install -r requirements.txt
+
+      - name: Run bot (270-minute polling cycle)
+        id: bot
+        if: steps.guard.outputs.skip != 'true'
+        env:
+          PYTHONUNBUFFERED: "1"
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GLM_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          YT_COOKIES: ${{ secrets.YT_COOKIES }}
+          YT_CLIENTS: ${{ vars.YT_CLIENTS || 'default,android_vr,web_safari,tv,web_embedded' }}
+          WHISPER_MODEL: ${{ vars.WHISPER_MODEL }}
+          MAX_VIDEO_MINUTES: ${{ vars.MAX_VIDEO_MINUTES }}
+          MAX_CONCURRENT_JOBS: "2"   # چەند داواکاری بە هاوکات جێبەجێ بکرێت (repo ی گشتی ٤ vCPU — دەکرێت ٣)
+          MAX_QUEUE: "8"             # زۆرترین ڕیزی چاوەڕوانی پێش پەیامی «ڕیزەکە پڕە»
+          RUN_SECONDS: "16200"       # ٢٧٠ خولەک — خولی polling (خولی درێژ = کارە گەورەکان پچڕان ناکەون)
+          IDLE_EXIT_SECONDS: "0"
+          HEAVY_BUDGET: "14400"      # ٤ کاتژمێر بۆ یەک ڤیدیۆ/دەنگ
+          JOB_DRAIN_SECONDS: "1500"  # ٢٥ خولەک چاوەڕوانی بۆ ئەرکەکان لە کۆتایی خول
+          BURN_SUBTITLES: "1"
+          BURN_MAX_MINUTES: "120"    # تا ڤیدیۆی ٢ کاتژمێر ژێرنووسی لەسەر دادەنرێت
+          SEND_PDF_COPY: "1"
+          OUT_VIDEO_MAX_MB: ${{ vars.OUT_VIDEO_MAX_MB || '20' }}                 # سنووری دەرچوو — API ی فەرمی
+          OUT_VIDEO_LOCAL_MAX_MB: ${{ vars.OUT_VIDEO_LOCAL_MAX_MB || '400' }}   # سنووری دەرچوو — سێرڤەری ناوخۆیی (تا 2GB)
+          SHRINK_OVER_MB: ${{ vars.SHRINK_OVER_MB || '60' }}
+          TG_API_BASE: ${{ env.TG_API_BASE }}
+          KURDISH_TTS_API_KEY: ${{ secrets.KURDISH_TTS_API_KEY }}
+          TTS_SPEAKER_ID: ${{ vars.TTS_SPEAKER_ID }}
+          TTS_SPEED: ${{ vars.TTS_SPEED }}
+          TTS_MAX_CHARS: ${{ vars.TTS_MAX_CHARS }}
+          # ١ = دەنگی کوردی سۆرانی بە بنەڕەت چالاکە (بەکارهێنەر دەتوانێت /voice_off بکات)
+          VOICE_DEFAULT: ${{ vars.VOICE_DEFAULT || '1' }}
+          # --- پاشەکەوتی فایلە وەرگیراوەکان لە GitHub (data/ + Release) ---
+          # هەر فایلێک بکرێت بۆت، هەمان فایل بۆ repo ی ئەم workflow ە بار دەکرێت:
+          #   ≤95MB → data/video.mp4 | گەورەتر تا 2GB → Release ی telegram-files
+          # ناچالاککردن: variable ی GH_UPLOAD = 0
+          GH_UPLOAD: ${{ vars.GH_UPLOAD || '1' }}
+          GH_UPLOAD_TOKEN: ${{ github.token }}
+          GH_UPLOAD_DIR: ${{ vars.GH_UPLOAD_DIR || 'data' }}
+          GH_UPLOAD_BRANCH: ${{ vars.GH_UPLOAD_BRANCH }}
+          GH_UPLOAD_MAX_MB: ${{ vars.GH_UPLOAD_MAX_MB || '95' }}
+          GH_UPLOAD_RELEASE_TAG: ${{ vars.GH_UPLOAD_RELEASE_TAG || 'telegram-files' }}
+        run: |
+          code=0
+          python bot.py || code=$?
+          echo "exit=$code" >> "$GITHUB_OUTPUT"
+          exit $code
+
+      - name: Save bot state
+        if: always() && steps.guard.outputs.skip != 'true' && hashFiles('state.json') != ''
+        uses: actions/cache/save@v4
+        with:
+          path: state.json
+          key: bot-state-${{ github.run_number }}
+
+      - name: Keep the bot online 24/7 (دەستپێکردنی خولی نوێ)
+        if: >-
+          always() && !cancelled() &&
+          steps.guard.outputs.skip != 'true' &&
+          contains(fromJSON('["success", "failure"]'), steps.bot.outcome) &&
+          steps.bot.outputs.exit != '42'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for i in 1 2 3; do
+            if gh workflow run bot.yml --ref "${GITHUB_REF_NAME:-main}"; then
+              echo "next cycle triggered — bot stays online"
+              exit 0
+            fi
+            echo "retry $i failed — waiting 20s"
+            sleep 20
+          done
+          echo "::warning::could not trigger next cycle; cron backup will recover within ~10 min"
