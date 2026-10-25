@@ -10,6 +10,9 @@
 #   - ڤیدیۆ / دەنگ (فایل یان لینکی YouTube / Facebook / TikTok / ...)
 #        دەنگ -> نووسین (faster-whisper) -> وەرگێڕان -> SRT + Word + PDF بە سۆرانی
 #        + ژێرنووسی کوردی ڕاستەوخۆ لەسەر ڤیدیۆکە دادەنرێت (burn-in بە ffmpeg/libass)
+#        + دەنگی کوردی سۆرانی (TTS) بە بنەڕەت جیگای دەنگی ڕەسەن دادەنرێت
+#        + ئەگەر فۆرماتەکانی ڤیدیۆی یووتیوب داخستبوون: لە دەنگەکە ڤیدیۆیەکی
+#          ناونیشاندار دروست دەکرێت بە ژێرنووسی کوردی و دەنگی کوردی
 #   - بزوێنەری وەرگێڕان: Google Translate (بەخۆڕایی) + GLM/Z.ai (یەدەگ)
 #   - پاشەکەوتی خۆکار لە GitHub: هەر فایلێک بکرێت بۆت، هەمان فایل بۆ فۆڵدەری
 #     data/ ی repo ی خاوەنی بۆت بار دەکرێت (video.mp4 → data/video.mp4)
@@ -101,6 +104,10 @@ TTS_SPEAKER   = (os.getenv("TTS_SPEAKER_ID") or "sorani_85").strip()   # خۆڕ�
 TTS_MODEL_V   = (os.getenv("TTS_MODEL_VERSION") or "v3").strip()
 TTS_SPEED     = float((os.getenv("TTS_SPEED") or "1.0").strip() or "1.0")
 TTS_MAX_CHARS = env_int("TTS_MAX_CHARS", 15000)  # سەقەتی پیت بۆ هەر ڤیدیۆیەک (پلانی خۆڕایی: 20000/مانگ)
+# دەنگی کوردی سۆرانی بە بنەڕەت چالاکە (١) — لەسەر هەموو ڤیدیۆ و لینکێک دادەنرێت؛
+# بەکارهێنەر دەتوانێت بە /voice_off ناچالاکی بکات و بە /voice_on بیکاتەوە —
+# هەڵبژاردنی بەکارهێنەر لەسەر ئەم بنەڕەتە چەسپاوە. 0 = بە بنەڕەت ناچالاک (وەکو پێشتر).
+VOICE_DEFAULT = max(0, min(1, env_int("VOICE_DEFAULT", 1)))
 # --- پاشەکەوتی فایلە وەرگیراوەکان لە GitHub — data/ + Release ---
 # کاتێک بەکارهێنەر فایلێک دەنێرێت، هەمان فایل بە خۆکاری بار دەکرێت بۆ repo ی
 # خاوەنی بۆت، بەپێی قەبارەکەی دوو ڕێگا:
@@ -152,11 +159,14 @@ WELCOME = (
     "  دەنێرمەوە + کۆپی PDF یش لەگەڵ دەکەم.\n"
     "• ڤیدیۆ یان دەنگ بنێری (فایل)، یان لینکی YouTube / Facebook / TikTok — دەنگەکە دەخوێنمەوە،\n"
     "  وەریدەگێڕم و بە فایلی SRT و Word و PDF دەینێرم + ژێرنووسی کوردی لەسەر ڤیدیۆکە دادەنێم.\n"
+    "  ئەگەر یووتیوب فۆرماتەکانی ڤیدیۆی بۆ سێرڤەرەکە دابگرت، لە دەنگەکە ڤیدیۆیەکی نوێ دروست\n"
+    "  دەکەم: وێنەی ناونیشان + ژێرنووسی کوردی + دەنگی کوردی.\n"
     "• ئەگەر ڤیدیۆکە لە ٢٠ مێگابایت گەورەتر بوو، بۆ خوار ٢٠ مێگابایت بچووکی دەکەمەوە.\n"
     "• چەند داواکاری بە یەک کات قبوڵ دەکرێت: هەر کەسێک داواکاری بکات یەکسەر وەردەگیرێت،\n"
     "  ئەوانی تر لە ڕیزدا دادەنرێن — پێویست ناکات چاوەڕوانی داواکاریی کەسی تر بمێنێتەوە.\n"
-    "• دەنگی کوردی سۆرانی لەسەر ڤیدیۆ (ئارەزوومەندانە): /voice_on بۆ چالاککردن،\n"
-    "  /voice_off بۆ ناچالاککردن — /voice بۆ زانینی دۆخ.\n"
+    "• دەنگی کوردی سۆرانی بە بنەڕەت چالاکە: لە ڤیدیۆکەدا دەنگە کوردییەکە جیگای دەنگی\n"
+    "  ڕەسەن دادەنێم — /voice_off بۆ ناچالاککردن، /voice_on بۆ چالاککردنەوە،\n"
+    "  /voice بۆ زانینی دۆخ.\n"
     "\n"
     "تێبینی گرنگ:\n"
     + ("• فایلی ڕاستەوخۆ دەبێت کەمتر بێت لە ٢٠ مێگابایت (سنووری تەلەگرام).\n" if not LOCAL_BOT_API else
@@ -166,8 +176,9 @@ WELCOME = (
 )
 
 PROG_DOWNLOAD   = "چاوەڕێ بکە... ڤیدیۆکە داگیر دەم. (بەپێی قەبارەکەی چەند خولەکێک دەخایەنێت)"
-MSG_LINK_AUDIO_ONLY = ("تێبینی: فۆرماتەکانی ڤیدیۆ بۆ سێرڤەرەکە داخستبوون، بۆیە تەنها دەنگەکە داگیرا — "
-                       "فایلی SRT و Word و PDF بە تەواوی دەنێردرێن؛ ژێرنووس لەسەر ڤیدیۆ نەکرا.")
+MSG_LINK_AUDIO_ONLY = ("تێبینی: فۆرماتەکانی ڤیدیۆ بۆ سێرڤەرەکە داخستبوون، بۆیە تەنها دەنگەکە داگیرا.\n"
+                       "بەڵام نیگەران مەبە — ئێستا ڤیدیۆکە لە دەنگەکە دروست دەکەم: وێنەی ناونیشان\n"
+                       "+ ژێرنووسی کوردی + دەنگی کوردی (فایلی SRT و Word و PDF یش دێن).")
 MSG_MEDIA_START = "چاوەڕێ بکە... فایلەکە دادەگرم و دەنگەکە دەخوێنمەوە."
 MSG_DOC_START   = "چاوەڕێ بکە... فایلەکە وەرگێڕ دەم. (بۆ فایلە گەورەکان چەند خولەکێک دەخایەنێت)"
 MSG_DOWNLOADED  = "داگیرا: {title}\nماوە: {dur} — ئێستا دەنگ دەخوێنمەوە..."
@@ -177,6 +188,10 @@ CAPTION_DOC     = "وەرگێڕانی کوردی سۆرانی ئامادەیە."
 CAPTION_PDF     = "هەمان وەرگێڕان بە شێوەی PDF."
 MSG_BURN_START   = "ئێستا ژێرنووسی کوردی لەسەر ڤیدیۆکە دادەنێم... (ئەم قۆناغە چەند خولەکێک دەخایەنێت)"
 CAPTION_BURN     = "ڤیدیۆکە بە ژێرنووسی کوردی سۆرانی."
+MSG_CARD_START   = "ئێستا ڤیدیۆکە لە دەنگەکە دروست دەکەم (وێنەی ناونیشان + ژێرنووسی کوردی)..."
+MSG_TTS_QUOTA    = ("دەنگی کوردی نەکرا: کلید یان سەقەتی TTS ی kurdishtts.com بەس ناکات.\n"
+                    "تکایە لە kurdishtts.com/settings/api پلانەکە بپشکنە یان کلیدی نوێ دابنێ\n"
+                    "(secret: KURDISH_TTS_API_KEY) — ڤیدیۆکە بە دەنگی ڕەسەن نێردرایەوە.")
 MSG_VIDEO_TOO_BIG = ("ڤیدیۆکە بە ژێرنووسی کوردی دروستکرا بەڵام قەبارەکەی زۆر گەورەیە بۆ ناردنەوە "
                      "لە Telegram. تکایە variable ی OUT_VIDEO_LOCAL_MAX_MB کەمتر بکە "
                      "یان ڤیدیۆکە بە بەشی بچووکتر بنێرە.")
@@ -1807,6 +1822,7 @@ def pptx_to_pdf(pptx_path, workdir, title):
 #  پلانی خۆڕایی: 20,000 پیت/مانگ، 500 پیت بۆ هەر داواکاری — دەنگی خۆڕایی: sorani_85
 
 _TTS_MEMO = {}
+_TTS_AUTH_FAIL = False   # True = کلید/سەقەتی ڕەتکرایەوەتەوە (401/403) — نامەی ڕوونتر بۆ بەکارهێنەر
 
 
 def tts_available():
@@ -1814,6 +1830,7 @@ def tts_available():
 
 
 def _tts_once(text):
+    global _TTS_AUTH_FAIL
     if not TTS_API_KEY:
         raise RuntimeError("KurdishTTS not configured (set KURDISH_TTS_API_KEY secret)")
     r = SESSION.post(
@@ -1825,6 +1842,7 @@ def _tts_once(text):
         timeout=120,
     )
     if r.status_code in (401, 403):
+        _TTS_AUTH_FAIL = True
         raise RuntimeError("kurdishtts http %s — key/quota: %s"
                            % (r.status_code, (r.text or "")[:120]))
     if r.status_code != 200:
@@ -1994,6 +2012,180 @@ def build_kurdish_voice_track(cues, texts, total_dur, workdir, workers=3):
     except Exception as e:
         log.warning("voice track error: %s", e)
         return None
+
+
+# --------- ڤیدیۆی ناونیشان لە دەنگەوە (کاتێک سەرچاوە تەنها دەنگە) ---------
+# کاتێک یووتیوب فۆرماتەکانی ڤیدیۆ بۆ ئایپی سێرڤەرەکە داخستبووە (SABR)، بۆت
+# تەنها دەنگەکە داگرتووە — بەڵام ئێستا بۆت لە دەنگەکە ڤیدیۆیەکی ڕاستەقینە
+# دروست دەکات (وێنەی ناونیشان + دەنگ) تا ژێرنووسی کوردی و دەنگی کوردی
+# لەسەری دادەنرێت و بەکارهێنەر هەمیشە ڤیدیۆیەک وەردەگرێت.
+
+_CARD_W, _CARD_H = 1280, 720
+
+
+def _title_card_png(png_path, title, workdir):
+    """وێنەی ناونیشان (١٢٨٠×٧٢٠) بۆ ڤیدیۆیەی لە دەنگەوە دروست دەکرێت:
+    پاشبنەمای gradient + ناونیشانی ڤیدیۆکە بە پیتە بەستراوەکان (RTL دروست،
+    arabic_reshaper + bidi) + ناونیشانی بۆت لە سەرەوە.
+    پیتە عەرەبی/کوردییەکان بە Noto Naskh دەکێشرێن؛ ئەوانی تر (لاتینی، نیشانەکان)
+    بە فۆنتی سیستەم (DejaVu/NotoSans) — بۆیە ناونیشانی تێکەڵ بەبێ چوارگۆشە دەردەکەوێت.
+    False ئەگەر PIL/fۆنت بەردەست نەبوو (ffmpeg پاشبنەمای ڕەنگی بەکاردەهێنێت)."""
+    try:
+        from PIL import Image, ImageDraw, ImageFont
+    except Exception:
+        return False
+    font_path = ensure_arabic_font(workdir)
+    if not font_path:
+        return False
+    # cmap ی فۆنتی عەرەبی — کام پیت تۆمارکراوە؟ (فۆنتی Naskh لاتینی/نیشانەکانی نییە)
+    ar_cmap = set()
+    try:
+        from fontTools.ttLib import TTFont
+        ar_cmap = set(TTFont(font_path, fontNumber=0).getBestCmap().keys())
+    except Exception:
+        pass
+    # فۆنتی دووەم بۆ پیتە غەیرە-عەرەبییەکان (ناونیشانی ئینگلیزی، نیشانەکان، ...)
+    latin_path = None
+    for p in ("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+              "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+              "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"):
+        if os.path.exists(p):
+            latin_path = p
+            break
+    # emoji لادەبەین — هیچ فۆنتێکی دەقی نایانکێشێت
+    title = re.sub(r"[\U0001F000-\U0001FAFF\u2600-\u27BF\u2190-\u21FF\u2B00-\u2BFF\uFE0F]",
+                   " ", title or "").strip() or "وەرگێڕانی کوردی سۆرانی"
+    if not latin_path and ar_cmap:
+        # هیچ فۆنتێکی لاتینی نییە — پیتە نەناسراوەکان لادەبەین تا چوارگۆشە نەدەرکەوێت
+        title = "".join(ch for ch in title if ord(ch) in ar_cmap or ch == " ").strip()
+    W, H = _CARD_W, _CARD_H
+    img = Image.new("RGB", (W, H))
+    d = ImageDraw.Draw(img)
+    # پاشبنەمای gradient ی ستوونی (شینی تاریک → شینی دەریایی)
+    top, bot = (15, 32, 46), (39, 81, 91)
+    for y in range(H):
+        t = y / (H - 1)
+        d.line([(0, y), (W, y)],
+               fill=tuple(int(a + (b - a) * t) for a, b in zip(top, bot)))
+    try:
+        f_title_ar = ImageFont.truetype(font_path, 58)
+        f_foot_ar = ImageFont.truetype(font_path, 34)
+        f_title_lt = (ImageFont.truetype(latin_path, 52)
+                      if latin_path else f_title_ar)
+        f_foot_lt = (ImageFont.truetype(latin_path, 30)
+                     if latin_path else f_foot_ar)
+    except Exception:
+        return False
+
+    def _is_ar(ch):
+        return (ord(ch) in ar_cmap) if ar_cmap else True
+
+    def _text_width(s, f_ar, f_lt):
+        total = 0.0
+        for ch in s:
+            f = f_ar if _is_ar(ch) else f_lt
+            try:
+                total += f.getlength(ch)
+            except Exception:
+                total += 30
+        return total
+
+    def _draw_mixed(draw, cx, cy, text, f_ar, f_lt, fill):
+        """دەقی شێوەدراو (visual order) بە ناوەڕاست دەکێشێت — بۆ هەر پیتێک
+        فۆنتی گونجاو: عەرەبی/کوردی → Naskh، ئەوانی تر → فۆنتی لاتینی."""
+        runs, cur, cur_ar = [], "", None
+        for ch in text:
+            a = _is_ar(ch)
+            if cur_ar is None:
+                cur_ar = a
+            elif a != cur_ar:
+                runs.append((cur, cur_ar))
+                cur, cur_ar = "", a
+            cur += ch
+        if cur:
+            runs.append((cur, cur_ar))
+        total = sum(_text_width(s, f_ar, f_lt) for s, _a in runs)
+        x = cx - total / 2.0
+        base = cy + int(f_ar.size * 0.34)     # baseline ≈ ناوەڕاست + ٣٤٪ی قەبارە
+        for s, a in runs:
+            f = f_ar if a else f_lt
+            try:
+                w = f.getlength(s)
+            except Exception:
+                w = len(s) * 30
+            draw.text((x, base), s, font=f, fill=fill, anchor="ls")
+            x += w
+
+    def _wrap(text, f_ar, f_lt, max_w):
+        words = (text or "").split()
+        lines, cur = [], ""
+        for w in words:
+            trial = (cur + " " + w).strip()
+            if _text_width(_disp(_shape(trial)), f_ar, f_lt) <= max_w or not cur:
+                cur = trial
+            else:
+                lines.append(cur)
+                cur = w
+        if cur:
+            lines.append(cur)
+        return lines
+
+    tl = _wrap(title, f_title_ar, f_title_lt, W - 220)
+    if len(tl) > 4:                     # زۆر درێژە — بە «...» دەبڕدرێت
+        tl = tl[:4]
+        tl[3] = tl[3] + " ..."
+    lh = 84
+    ty = int(H * 0.40) - (len(tl) - 1) * lh // 2
+    # هێڵێکی ڕازاندنەوە لەسەر ناونیشان
+    d.rectangle([(W // 2 - 70, ty - 86), (W // 2 + 70, ty - 78)], fill=(214, 178, 86))
+    for i, ln in enumerate(tl):
+        _draw_mixed(d, W // 2, ty + i * lh, _disp(_shape(ln)),
+                    f_title_ar, f_title_lt, (245, 247, 248))
+    foot = "وەرگێڕانی کوردی سۆرانی — ژێرنووس و دەنگ"
+    _draw_mixed(d, W // 2, 76, _disp(_shape(foot)),
+                f_foot_ar, f_foot_lt, (190, 205, 212))
+    try:
+        img.save(png_path, "PNG")
+    except Exception:
+        return False
+    return os.path.exists(png_path) and os.path.getsize(png_path) > 0
+
+
+def make_audio_video(src_audio, out_path, workdir, title=None, timeout=3600):
+    """لە سەرچاوەیەکی تەنها-دەنگ ڤیدیۆ دروست دەکات: وێنەی ناونیشان + دەنگەکە.
+    (کاتێک یووتیوب فۆرماتەکانی ڤیدیۆ بۆ سێرڤەرەکە داخستبوون — بۆت هێشتا
+    ڤیدیۆیەکی ژێرنووسدار بە دەنگی کوردی بەرهەم دەهێنێت.)
+    دەرچووەکە ٢ framerate ی نیوەیە (وێنەی جێگیرە) — بۆیە زۆر خێرا ئینکۆد دەبێت
+    تەنانەت بۆ دەنگی چەند کاتژمێرێک. ئەگەر سەرنەچوو None."""
+    if not shutil.which("ffmpeg"):
+        raise BotError(ERR_FFMPEG)
+    png = os.path.join(workdir, "title_card.png")
+    try:
+        card_ok = _title_card_png(png, title, workdir)
+    except Exception as e:
+        log.warning("title card error: %s", e)
+        card_ok = False
+    if card_ok:
+        cmd = ["ffmpeg", "-y", "-loglevel", "error",
+               "-loop", "1", "-framerate", "2", "-i", png]
+    else:
+        log.warning("title card unavailable — plain color background")
+        cmd = ["ffmpeg", "-y", "-loglevel", "error", "-f", "lavfi",
+               "-i", "color=c=0x1d3557:s=%dx%d:r=2" % (_CARD_W, _CARD_H)]
+    cmd += ["-i", os.path.abspath(src_audio),
+            "-c:v", "libx264", "-preset", "veryfast", "-tune", "stillimage",
+            "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "160k",
+            "-shortest", "-movflags", "+faststart", out_path]
+    try:
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise BotError(ERR_LONG)
+    if res.returncode != 0 or not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+        log.warning("make_audio_video failed: %s", (res.stderr or "")[-400:])
+        return None
+    log.info("audio-only source -> title-card video: %.1fs",
+             ffprobe_duration(out_path) or 0.0)
+    return out_path
 
 
 # ----------------------- ڤیدیۆ / دەنگ -----------------------------
@@ -2677,7 +2869,7 @@ def ytdl_download(url, workdir):
     raise BotError(err_link(" | ".join(errors)))
 
 
-def run_speech_pipeline(src_path, chat, workdir, state=None):
+def run_speech_pipeline(src_path, chat, workdir, state=None, title=None):
     t0 = time.time()
     tg_action(chat, "typing")
     # تێبینی: بچووکردنەوەی پێشوەخت لابرا — ئێستا سووتاندنی ژێرنووس خۆی بە یەک پاس
@@ -2736,13 +2928,15 @@ def run_speech_pipeline(src_path, chat, workdir, state=None):
     tg_send_doc(chat, docx_path, None)
     if pdf_path:
         tg_send_doc(chat, pdf_path, None)
-    # ---- دەنگی کوردی سۆرانی (TTS) ئەگەر بەکارهێنەر چالاکی کردبێت ----
-    voice_on = bool((((state or {}).get("voice")) or {}).get(str(chat)))
+    # ---- دەنگی کوردی سۆرانی (TTS) — بە بنەڕەت چالاکە (VOICE_DEFAULT=1)؛
+    #      هەڵبژاردنی بەکارهێنەر (/voice_on یان /voice_off) لەسەری چەسپاوە.
+    #      بۆ سەرچاوەی تەنها-دەنگیش دروست دەکرێت (ڤیدیۆی ناونیشان بە دەنگی کوردی) ----
+    voice_on = voice_enabled(state, chat)
     voice_track = None
     if voice_on:
         if not tts_available():
             _safe_send(chat, MSG_TTS_NOKEY)
-        elif ffprobe_has_video(src_path):
+        else:
             v_chk = float(dur or 0) or ffprobe_duration(src_path)
             if not (v_chk and v_chk > BURN_MAX_MINUTES * 60):
                 tg_send(chat, MSG_TTS_START)
@@ -2753,12 +2947,27 @@ def run_speech_pipeline(src_path, chat, workdir, state=None):
                     _safe_send(chat, "هەڵە: %s" % e)
                     voice_track = None
                 if not voice_track:
-                    _safe_send(chat, MSG_TTS_FAIL)
-    # ---- ژێرنووسی کوردی لەسەر خۆی ڤیدیۆ (burn-in) ----
+                    _safe_send(chat, MSG_TTS_QUOTA if _TTS_AUTH_FAIL else MSG_TTS_FAIL)
+    # ---- ژێرنووسی کوردی لەسەر ڤیدیۆ (burn-in) ----
+    # ئەگەر سەرچاوەکە تەنها دەنگ بێت (فۆرماتەکانی ڤیدیۆی یووتیوب داخستبوون)،
+    # سەرەتا ڤیدیۆیەکی ناونیشان لە دەنگەکە دروست دەکرێت — بۆیە بەکارهێنەر
+    # هەمیشە ڤیدیۆیەکی ژێرنووسدار وەردەگرێت، تەنانەت بەبێ فۆرماتی ڤیدیۆ.
     if BURN_SUBTITLES:
         v_dur = float(dur or 0) or ffprobe_duration(src_path)
+        burn_src = src_path
         if not ffprobe_has_video(src_path):
-            log.info("burn skipped: source has no video stream (audio only)")
+            log.info("source has no video stream — building title-card video from audio")
+            tg_send(chat, MSG_CARD_START)
+            tg_action(chat, "upload_video")
+            card_out = os.path.join(workdir, "sorani_%s_card.mp4" % base)
+            try:
+                burn_src = make_audio_video(src_path, card_out, workdir,
+                                            title=title or base) or src_path
+            except BotError as e:
+                _safe_send(chat, "هەڵە: %s" % e)
+                burn_src = src_path
+        if not ffprobe_has_video(burn_src):
+            log.info("burn skipped: no video stream available (card video failed)")
         elif v_dur and v_dur > BURN_MAX_MINUTES * 60:
             _safe_send(chat, MSG_BURN_SKIPPED.format(max=BURN_MAX_MINUTES))
         elif _past_hard_deadline():
@@ -2776,7 +2985,7 @@ def run_speech_pipeline(src_path, chat, workdir, state=None):
             tg_action(chat, "upload_video")
             vid_out = os.path.join(workdir, "sorani_%s_subtitled.mp4" % base)
             try:
-                vid_path = burn_subtitles(src_path, srt_path, vid_out, workdir,
+                vid_path = burn_subtitles(burn_src, srt_path, vid_out, workdir,
                                           voice_track=voice_track,
                                           target_mb=tgt, duration=v_dur)
             except BotError as e:
@@ -2937,7 +3146,7 @@ def handle_media_file(tg_file, chat, workdir, name_hint="media", state=None, sen
     tg_send(chat, MSG_MEDIA_START)
     path = tg_download(tg_file["file_id"], workdir, name_hint, size_hint=size)
     gh_backup_file(path, sender)      # پاشەکەوتی فایلە ڕەسەنەکە لە GitHub (data/)
-    run_speech_pipeline(path, chat, workdir, state)
+    run_speech_pipeline(path, chat, workdir, state, title=name_hint)
 
 
 def handle_link(url, chat, workdir, state=None):
@@ -2956,7 +3165,7 @@ def handle_link(url, chat, workdir, state=None):
     if audio_only:
         msg += "\n\n%s" % MSG_LINK_AUDIO_ONLY
     tg_send(chat, msg)
-    run_speech_pipeline(src_path, chat, workdir, state)
+    run_speech_pipeline(src_path, chat, workdir, state, title=title)
 
 
 def handle_text_translate(text, chat):
@@ -2966,6 +3175,16 @@ def handle_text_translate(text, chat):
         tg_send(chat, MSG_ALREADY)
     else:
         tg_send(chat, out)
+
+
+def voice_enabled(state, chat):
+    """دەنگی کوردی چالاکە بۆ ئەم چاتە؟
+    هەڵبژاردنی بەکارهێنەر (/voice_on یان /voice_off) لەسەر بنەڕەتەکە چەسپاوە؛
+    ئەگەر بەکارهێنەر هیچی هەڵنەبژاردووە — VOICE_DEFAULT (بنەڕەت: چالاک)."""
+    pref = ((state or {}).get("voice") or {})
+    if str(chat) in pref:
+        return bool(pref.get(str(chat)))
+    return bool(VOICE_DEFAULT)
 
 
 def handle_command(text, chat, state):
@@ -2993,8 +3212,8 @@ def handle_command(text, chat, state):
         tg_send(chat, MSG_VOICE_OFF)
         return True
     if cmd in ("/voice", "/deng", "/voice_status", "/settings"):
-        on = voice.get(str(chat)) if is_dict else False
-        tg_send(chat, MSG_VOICE_STATUS_ON if on else MSG_VOICE_STATUS_OFF)
+        tg_send(chat, MSG_VOICE_STATUS_ON if voice_enabled(state, chat)
+                else MSG_VOICE_STATUS_OFF)
         return True
     if cmd.startswith("/"):
         tg_send(chat, WELCOME)
@@ -3192,6 +3411,8 @@ def self_check():
             print("github repo access: FAIL", e)
     print("kurdish tts:", ("on, speaker=%s" % TTS_SPEAKER) if TTS_API_KEY
           else "off (set KURDISH_TTS_API_KEY secret)")
+    print("kurdish voice default:", "ON (/voice_off to disable)" if VOICE_DEFAULT
+          else "OFF (/voice_on to enable)")
     try:
         import yt_dlp
         print("yt-dlp:", yt_dlp.version.__version__)
