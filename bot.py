@@ -11,6 +11,8 @@
 #        دەنگ -> نووسین (faster-whisper) -> وەرگێڕان -> SRT + Word + PDF بە سۆرانی
 #        + ژێرنووسی کوردی ڕاستەوخۆ لەسەر ڤیدیۆکە دادەنرێت (burn-in بە ffmpeg/libass)
 #   - بزوێنەری وەرگێڕان: Google Translate (بەخۆڕایی) + GLM/Z.ai (یەدەگ)
+#   - پاشەکەوتی خۆکار لە GitHub: هەر فایلێک بکرێت بۆت، هەمان فایل بۆ فۆڵدەری
+#     data/ ی repo ی خاوەنی بۆت بار دەکرێت (video.mp4 → data/video.mp4)
 #   - هاوکات: چەند داواکاری بە یەک کات قبوڵ دەکرێت — تا MAX_CONCURRENT_JOBS
 #     بە هاوکات جێبەجێ دەکرێن و ئەوانی تر لە ڕیزدا دادەنرێن (هیچ داواکارییەک ڕەت نابێتەوە)
 #   - لە GitHub Actions ٢٤/٧ کار دەکات: هەر خولێک ٤٥ خولەکە و لە کۆتایی خولێکی نوێ
@@ -19,6 +21,7 @@
 #  کاردانەوەی خێرا: python bot.py --check   (پشکنینی ژینگە)
 # =====================================================================
 
+import base64
 import glob
 import io
 import json
@@ -33,6 +36,7 @@ import tempfile
 import threading
 import time
 import traceback
+import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
@@ -93,6 +97,22 @@ TTS_SPEAKER   = (os.getenv("TTS_SPEAKER_ID") or "sorani_85").strip()   # خۆڕ�
 TTS_MODEL_V   = (os.getenv("TTS_MODEL_VERSION") or "v3").strip()
 TTS_SPEED     = float((os.getenv("TTS_SPEED") or "1.0").strip() or "1.0")
 TTS_MAX_CHARS = env_int("TTS_MAX_CHARS", 15000)  # سەقەتی پیت بۆ هەر ڤیدیۆیەک (پلانی خۆڕایی: 20000/مانگ)
+# --- پاشەکەوتی فایلە وەرگیراوەکان لە GitHub — data/ + Release ---
+# کاتێک بەکارهێنەر فایلێک دەنێرێت، هەمان فایل بە خۆکاری بار دەکرێت بۆ repo ی
+# خاوەنی بۆت، بەپێی قەبارەکەی دوو ڕێگا:
+#   • ≤ سنوور (GH_UPLOAD_MAX_MB، زۆرترین ١٠٠MB)  →  data/video.mp4  (Contents API)
+#   • سەرووی ئەوە تا ٢GB                         →  Release «telegram-files»
+#     (GitHub بۆ فۆڵدەری repo فایلی >١٠٠MB بلۆک دەکات — ڕلیز تا ٢GB قبوڵ دەکات)
+# لە Actions دا: GH_UPLOAD_TOKEN لە bot.yml دێت (github.token) و repo / branch
+# خۆکارانە لە GITHUB_REPOSITORY / GITHUB_REF_NAME ەوە دەخوێنرێنەوە.
+GH_UPLOAD        = env_int("GH_UPLOAD", 1)          # 0 = ناچالاک
+GH_UPLOAD_TOKEN  = (os.getenv("GH_UPLOAD_TOKEN") or os.getenv("GITHUB_TOKEN") or "").strip()
+GH_UPLOAD_REPO   = (os.getenv("GH_UPLOAD_REPO") or os.getenv("GITHUB_REPOSITORY") or "").strip()
+GH_UPLOAD_BRANCH = (os.getenv("GH_UPLOAD_BRANCH") or os.getenv("GITHUB_REF_NAME") or "").strip()
+GH_UPLOAD_DIR    = (os.getenv("GH_UPLOAD_DIR") or "data").strip().strip("/")
+GH_UPLOAD_MAX_MB = env_int("GH_UPLOAD_MAX_MB", 95)  # سنووری Contents API (زۆرترین ١٠٠) — 0 = بێ پشکنین
+GH_RELEASE_TAG   = (os.getenv("GH_UPLOAD_RELEASE_TAG") or "telegram-files").strip()  # ڕلیزی فایلە گەورەکان
+GH_RELEASE_MAX_MB = 2000                            # سنووری ڕەهای GitHub بۆ هەر ئەسێتێکی ڕلیز (2GB)
 
 TG_API = TG_BASE + "/bot" + BOT_TOKEN
 TG_MAX_FILE = (2000 if LOCAL_BOT_API else 20) * 1024 * 1024
@@ -639,6 +659,258 @@ def save_state(state):
         with open(tmp, "w", encoding="utf-8") as fh:
             json.dump(state, fh)
         os.replace(tmp, STATE_FILE)
+
+
+# ------------- پاشەکەوتی فایلەکان لە GitHub (data/ + Release) -------------
+#  کاتێک بەکارهێنەر فایلێک دەنێرێت (ڤیدیۆ / دۆکیومێنت / دەنگ)، هەمان فایل
+#  بە خۆکاری بۆ repo ی خاوەنی بۆت بار دەکرێت، بەپێی قەبارەکەی:
+#      Send file to bot: video.mp4 (50MB)   →   github: data/video.mp4
+#      Send file to bot: movie.mp4 (300MB)  →   Releases → «telegram-files»
+#  • لە پاشبنەمایەکدا (thread) کار دەکات — وەرگێڕان هەرگیز چاوەڕوانی نابێت.
+#  • هەر هەڵەیەک تەنها لۆگ دەکرێت — کارە سەرەکییەکان (وەرگێڕان) ناچەشنێت.
+#  • فایلی ≤ سنوور (٩٥MB بنەڕەت، زۆرترین ١٠٠ — سنووری Contents API ی GitHub)
+#    → فۆڵدەری data/؛ سەرووی ئەوە تا ٢GB → ئەسێتی ڕلیز (GitHub بۆ git ی ئاسایی
+#    فایلی >١٠٠MB بلۆک دەکات — ڕلیز تا ٢GB قبوڵ دەکات).
+#  • ئەگەر هەمان ناو هەبوو: video_20261025-143022.mp4 (تایمستامپ).
+#  • commit ی فایلی بچووک ناوی نێرەری تێدایە؛ ناوی نێرەر + کات دەچنە ناو
+#    وەسفی ڕلیزەکە بۆ فایلە گەورەکان.
+
+_UPLOAD_THREADS = []
+_UPLOAD_TBUDGET = {}   # thread → بودجەی چاوەڕوانی (چرکە) بۆ فایلە گەورەکان
+_UPLOAD_TLOCK = threading.Lock()
+
+
+def gh_upload_ready():
+    """چالاکە تەنها ئەگەر GH_UPLOAD=0 نەبێت و token + repo هەبن."""
+    return bool(GH_UPLOAD and GH_UPLOAD_TOKEN and GH_UPLOAD_REPO)
+
+
+def gh_api_headers():
+    return {"Authorization": "Bearer %s" % GH_UPLOAD_TOKEN,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28"}
+
+
+def _gh_contents_url(repo_path):
+    return "%s/repos/%s/contents/%s" % ("https://api.github.com", GH_UPLOAD_REPO,
+                                        urllib.parse.quote(repo_path))
+
+
+def _gh_alt_path(repo_path):
+    """data/video.mp4 → data/video_20261025-143022.mp4"""
+    folder, fname = os.path.split(repo_path)
+    stem, ext = os.path.splitext(fname)
+    alt = "%s_%s%s" % (stem, time.strftime("%Y%m%d-%H%M%S"), ext)
+    return "%s/%s" % (folder, alt) if folder else alt
+
+
+def _gh_put_file(repo_path, data_b64, commit_msg):
+    """یەک هەوڵی PUT — گەڕانەوەی URL ی فایلەکە، یان None لە حاڵەتی شکست."""
+    body = {"message": commit_msg, "content": data_b64}
+    if GH_UPLOAD_BRANCH:
+        body["branch"] = GH_UPLOAD_BRANCH
+    r = SESSION.put(_gh_contents_url(repo_path), headers=gh_api_headers(),
+                    json=body, timeout=600)
+    if r.status_code in (200, 201):
+        out = ""
+        try:
+            out = ((r.json() or {}).get("content") or {}).get("html_url") or ""
+        except Exception:
+            pass
+        log.info("github archive OK: %s (%.1f MB)", out or repo_path,
+                 len(data_b64) * 0.75 / 1e6)
+        return out or repo_path
+    log.warning("github archive PUT failed (%s): %s", r.status_code, (r.text or "")[:200])
+    return None
+
+
+def _gh_upload_worker(repo_path, data_b64, commit_msg):
+    """PUT — ئەگەر ناوەکە هەمان بوو یان branch لە یەک کاتدا جوڵا (409/422)،
+    ناوێکی تایمستامپدار و یەک هەوڵی تر."""
+    try:
+        out = _gh_put_file(repo_path, data_b64, commit_msg)
+        if not out:
+            _gh_put_file(_gh_alt_path(repo_path), data_b64, commit_msg)
+    except Exception as e:
+        log.warning("github archive failed: %s", e)
+
+
+# --- فایلە گەورەکان (سەرووی سنووری Contents API) → Release (تا 2GB) ---
+
+def _gh_release_tag_url():
+    return "https://api.github.com/repos/%s/releases/tags/%s" % (
+        GH_UPLOAD_REPO, urllib.parse.quote(GH_RELEASE_TAG))
+
+
+def _gh_get_or_create_release():
+    """ID + وەسفی ڕلیزی ئەرشیڤ دەگەڕێنێتەوە — ئەگەر نەبوو دروستی دەکات.
+    → (release_id, body) یان None لە حاڵەتی شکست."""
+    try:
+        r = SESSION.get(_gh_release_tag_url(), headers=gh_api_headers(), timeout=30)
+        if r.status_code == 200:
+            j = r.json() or {}
+            return (j["id"], j.get("body") or "") if j.get("id") else None
+        if r.status_code != 404:
+            log.warning("github release GET failed (%s): %s",
+                        r.status_code, (r.text or "")[:200])
+            return None
+        body = {"tag_name": GH_RELEASE_TAG,
+                "name": "Telegram files — ئەرشیڤی فایلەکان",
+                "body": "پاشەکەوتی خۆکاری فایلە گەورەکانی تەلەگرام (سەرووی %dMB — تا ٢GB) "
+                        "— لەلایەن بۆتی وەرگێڕانەوە." % min(GH_UPLOAD_MAX_MB or 100, 100)}
+        r2 = SESSION.post("https://api.github.com/repos/%s/releases" % GH_UPLOAD_REPO,
+                          headers=gh_api_headers(), json=body, timeout=30)
+        if r2.status_code == 201:
+            j = r2.json() or {}
+            log.info("github release created: tag=%s", GH_RELEASE_TAG)
+            return (j["id"], j.get("body") or "") if j.get("id") else None
+        # ڕکابەری — ڕلیزەکە لەوانەیە لە خولێکی تر دروستکرابێت — دووبارە بگەڕێ
+        r3 = SESSION.get(_gh_release_tag_url(), headers=gh_api_headers(), timeout=30)
+        if r3.status_code == 200:
+            j = r3.json() or {}
+            return (j["id"], j.get("body") or "") if j.get("id") else None
+        log.warning("github release create failed (%s): %s",
+                    r2.status_code, (r2.text or "")[:200])
+    except Exception as e:
+        log.warning("github release get/create failed: %s", e)
+    return None
+
+
+def _gh_upload_asset(release_id, safe_path, fname):
+    """یەک هەوڵی بارکردنی ئەسێت بۆ ڕلیز — ستریم ڕاستەوخۆ لە دیسکەوە (بێ یادگا).
+    → URL ی داگرتن، یان None."""
+    url = ("https://uploads.github.com/repos/%s/releases/%d/assets?name=%s"
+           % (GH_UPLOAD_REPO, release_id, urllib.parse.quote(fname)))
+    headers = gh_api_headers()
+    headers["Content-Type"] = "application/octet-stream"
+    try:
+        with open(safe_path, "rb") as fh:
+            r = SESSION.post(url, headers=headers, data=fh, timeout=900)
+    except Exception as e:
+        log.warning("github release asset failed (%s): %s", fname, e)
+        return None
+    if r.status_code == 201:
+        try:
+            return (r.json() or {}).get("browser_download_url") or fname
+        except Exception:
+            return fname
+    log.warning("github release asset rejected (%s): %s",
+                r.status_code, (r.text or "")[:200])
+    return None
+
+
+def _gh_release_note(release_id, body, fname, size, who):
+    """ناوی نێرەر + کات + قەبارە دەخاتە ناو وەسفی ڕلیزەکە (best-effort)."""
+    try:
+        sender = who.replace(" from ", "").strip() if who else ""
+        line = "- `%s` — %s%s (%.1f MB)" % (fname, sender + " — " if sender else "",
+                                            time.strftime("%Y-%m-%d %H:%M"), size / 1e6)
+        new_body = ((body or "").rstrip() + "\n" + line).strip()
+        SESSION.patch("https://api.github.com/repos/%s/releases/%d"
+                      % (GH_UPLOAD_REPO, release_id),
+                      headers=gh_api_headers(), json={"body": new_body}, timeout=30)
+    except Exception as e:
+        log.warning("github release note failed: %s", e)
+
+
+def _gh_release_worker(safe_path, safe_dir, fname, size, who):
+    """کارکەری پاشبنەمای ڕلیز — فایلەکە لە کۆپی سەلامەتی /tmp ەوە ستریم دەکرێت."""
+    try:
+        rel = _gh_get_or_create_release()
+        if not rel:
+            log.warning("github release unavailable (%s) — big file not archived: %s",
+                        GH_RELEASE_TAG, fname)
+            return
+        rid, body = rel
+        out = _gh_upload_asset(rid, safe_path, fname)
+        if not out:      # ناوە دووبارەکان → ناوی تایمستامپدار
+            out = _gh_upload_asset(rid, safe_path, _gh_alt_path(fname))
+        if out:
+            log.info("github archive OK (release %s): %s", GH_RELEASE_TAG, out)
+            _gh_release_note(rid, body, fname, size, who)
+        else:
+            log.warning("github release upload failed for %s", fname)
+    except Exception as e:
+        log.warning("github release upload failed: %s", e)
+    finally:
+        shutil.rmtree(safe_dir, ignore_errors=True)
+
+
+def _gh_backup_big(path, fname, size, who):
+    """فایلی گەورە (سەرووی سنووری Contents API — تا ٢GB) بۆ ڕلیز دادەنرێت.
+    فایلەکە یەکسەر بۆ فۆڵدەرێکی سەلامەتی /tmp کۆپی دەکرێت (هاوکات — چونکە
+    task_dir دواتر دەسڕدرێتەوە)، پاشان thread ەکە ستریم لە دیسکەوە دەکات."""
+    if size > GH_RELEASE_MAX_MB * 1024 * 1024:
+        log.warning("github archive skipped (%.1f MB > %d MB release limit): %s",
+                    size / 1e6, GH_RELEASE_MAX_MB, fname)
+        return None
+    try:
+        safe_dir = tempfile.mkdtemp(prefix="ghrel_")
+        safe = os.path.join(safe_dir, fname)
+        shutil.copyfile(path, safe)     # هاوکات — پێش سڕینەوەی task_dir
+        t = threading.Thread(target=_gh_release_worker,
+                             args=(safe, safe_dir, fname, size, who),
+                             name="gh-release", daemon=True)
+        with _UPLOAD_TLOCK:
+            _UPLOAD_THREADS.append(t)
+            _UPLOAD_TBUDGET[t] = max(120, 60 + size // (6 * 1024 * 1024))
+        t.start()
+        log.info("github archive queued (release %s): %s (%.1f MB)",
+                 GH_RELEASE_TAG, fname, size / 1e6)
+        return "release:%s" % fname
+    except Exception as e:
+        log.warning("github archive failed: %s", e)
+        return None
+
+
+def gh_backup_file(path, sender=""):
+    """فایلە ڕەسەنەکە بۆ repo ی خاوەنی بۆت بار دەکات (لە پاشبنەمایەکدا):
+      • ≤ سنوور (GH_UPLOAD_MAX_MB، زۆرترین ١٠٠MB)  →  فۆڵدەری data/ (Contents API)
+      • سەرووی ئەوە تا ٢GB                         →  Release ی GH_RELEASE_TAG
+    فایلەکە یەکسەر دەخوێنرێتە یاد / کۆپی دەکرێت — چونکە فۆڵدەری کارەکە دواتر
+    دەسڕدرێتەوە. هیچ هەڵەیەک ناگوازرێتەوە — تەنها لۆگ."""
+    try:
+        if not gh_upload_ready() or not path or not os.path.isfile(path):
+            return None
+        size = os.path.getsize(path)
+        if size <= 0:
+            return None
+        fname = sanitize(os.path.basename(path))
+        who = (" from %s" % re.sub(r"\s+", " ", sender).strip()) if sender else ""
+        # سنووری ڕاستەقینەی Contents API ی GitHub = ١٠٠MB — GH_UPLOAD_MAX_MB
+        # تەنها دەتوانێت ئەم سنوورە بچووکتر بکات (0 = بێ سنووری خۆکارانە ١٠٠)
+        small_limit = min(GH_UPLOAD_MAX_MB, 100) if GH_UPLOAD_MAX_MB > 0 else 100
+        if size > small_limit * 1024 * 1024:
+            return _gh_backup_big(path, fname, size, who)
+        with open(path, "rb") as fh:
+            data_b64 = base64.b64encode(fh.read()).decode("ascii")
+        repo_path = ("%s/%s" % (GH_UPLOAD_DIR, fname)) if GH_UPLOAD_DIR else fname
+        msg = "data: %s%s (telegram bot)" % (fname, who)
+        t = threading.Thread(target=_gh_upload_worker, args=(repo_path, data_b64, msg),
+                             name="gh-upload", daemon=True)
+        with _UPLOAD_TLOCK:
+            _UPLOAD_THREADS.append(t)
+        t.start()
+        log.info("github archive queued: %s (%.1f MB)", repo_path, size / 1e6)
+        return repo_path
+    except Exception as e:
+        log.warning("github archive failed: %s", e)
+        return None
+
+
+def join_gh_uploads(timeout=180):
+    """لە کۆتایی خول — چاوەڕوانی بۆ تەواوبوونی بارکردنەکان پێش دەرچوونی پرۆسێس.
+    بۆ بارکردنە گەورەکانی ڕلیز بودجەی گەورەتر هەیە (بەپێی قەبارەی فایل)."""
+    with _UPLOAD_TLOCK:
+        threads = [t for t in _UPLOAD_THREADS if t.is_alive()]
+        budgets = {id(t): _UPLOAD_TBUDGET.pop(t, 0) for t in list(_UPLOAD_TBUDGET)}
+        del _UPLOAD_THREADS[:]
+    if not threads:
+        return
+    log.info("waiting for %d github archive upload(s)...", len(threads))
+    per = max(15, timeout // len(threads))
+    for t in threads:
+        t.join(timeout=budgets.get(id(t), 0) or per)
 
 
 # -------------------------- وەرگێڕان ---------------------------------
@@ -2509,7 +2781,7 @@ def route_media(name, mime):
     return None
 
 
-def handle_document_file(tg_file, name, chat, workdir):
+def handle_document_file(tg_file, name, chat, workdir, sender=""):
     kind = route_document(name, tg_file.get("mime_type") or "")
     if not kind:
         raise BotError(MSG_UNSUPPORTED)
@@ -2518,6 +2790,7 @@ def handle_document_file(tg_file, name, chat, workdir):
         raise BotError(err_big(size=size))
     tg_send(chat, MSG_DOC_START)
     path = tg_download(tg_file["file_id"], workdir, name, size_hint=size)
+    gh_backup_file(path, sender)      # پاشەکەوتی فایلە ڕەسەنەکە لە GitHub (data/)
     with open(path, "rb") as fh:
         data = fh.read()
     stem = sanitize(os.path.splitext(os.path.basename(name))[0]) or "file"
@@ -2603,12 +2876,13 @@ def handle_document_file(tg_file, name, chat, workdir):
         tg_send_doc(chat, pdf_path, CAPTION_PDF)
 
 
-def handle_media_file(tg_file, chat, workdir, name_hint="media", state=None):
+def handle_media_file(tg_file, chat, workdir, name_hint="media", state=None, sender=""):
     size = int(tg_file.get("file_size") or 0)
     if size > TG_MAX_FILE:
         raise BotError(err_big(size=size))
     tg_send(chat, MSG_MEDIA_START)
     path = tg_download(tg_file["file_id"], workdir, name_hint, size_hint=size)
+    gh_backup_file(path, sender)      # پاشەکەوتی فایلە ڕەسەنەکە لە GitHub (data/)
     run_speech_pipeline(path, chat, workdir, state)
 
 
@@ -2674,21 +2948,37 @@ def handle_command(text, chat, state):
     return False
 
 
+def sender_label(msg):
+    """ناوی نێرەر بۆ نامەی commit ی GitHub — وەکو: «Ahmed (id 123)»."""
+    try:
+        u = msg.get("from") or {}
+        name = (u.get("username")
+                or " ".join(x for x in (u.get("first_name"), u.get("last_name")) if x)
+                or "").strip()
+        uid = u.get("id")
+        if name and uid:
+            return "%s (id %s)" % (name, uid)
+        return name or (("id %s" % uid) if uid else "")
+    except Exception:
+        return ""
+
+
 def handle_message(msg, chat, workdir, state=None):
+    sender = sender_label(msg)
     doc = msg.get("document")
     if doc:
         name = doc.get("file_name") or "file"
         if route_document(name, doc.get("mime_type") or ""):
-            handle_document_file(doc, name, chat, workdir)
+            handle_document_file(doc, name, chat, workdir, sender=sender)
         elif route_media(name, doc.get("mime_type") or ""):
-            handle_media_file(doc, chat, workdir, os.path.basename(name), state)
+            handle_media_file(doc, chat, workdir, os.path.basename(name), state, sender=sender)
         else:
             raise BotError(MSG_UNSUPPORTED)
         return
 
     for key in ("video", "voice", "audio", "video_note"):
         if key in msg:
-            handle_media_file(msg[key], chat, workdir, key, state)
+            handle_media_file(msg[key], chat, workdir, key, state, sender=sender)
             return
 
     text = (msg.get("text") or "").strip()
@@ -2830,6 +3120,19 @@ def self_check():
     print("telegram api:", ("LOCAL Bot API server (%s) — files up to 2GB "
           "(server must run with --local / env TELEGRAM_LOCAL=1)" % TG_BASE)
           if LOCAL_BOT_API else "official api.telegram.org — downloads up to 20MB")
+    print("github archive:", ("on — repo %s | folder %s | branch %s | small ≤%d MB | big → release «%s» (≤2GB)"
+          % (GH_UPLOAD_REPO, GH_UPLOAD_DIR or "(root)", GH_UPLOAD_BRANCH or "(default)",
+             min(GH_UPLOAD_MAX_MB, 100) if GH_UPLOAD_MAX_MB > 0 else 100,
+             GH_RELEASE_TAG)) if gh_upload_ready()
+          else "off (GH_UPLOAD_TOKEN / GH_UPLOAD_REPO missing — bot.yml provides them in Actions)")
+    if gh_upload_ready():
+        try:
+            r = SESSION.get("https://api.github.com/repos/%s" % GH_UPLOAD_REPO,
+                            headers=gh_api_headers(), timeout=20)
+            print("github repo access:", "OK" if r.status_code == 200
+                  else "FAIL %s %s" % (r.status_code, (r.text or "")[:120]))
+        except Exception as e:
+            print("github repo access: FAIL", e)
     print("kurdish tts:", ("on, speaker=%s" % TTS_SPEAKER) if TTS_API_KEY
           else "off (set KURDISH_TTS_API_KEY secret)")
     try:
@@ -2920,6 +3223,7 @@ def main():
         except Exception:
             pass
         os._exit(0)     # خولی نوێ لە Actions دەست پێدەکات — ڕیزەکە لەدەست ناچێت
+    join_gh_uploads(180)     # چاوەڕوانی بۆ بارکردنەکانی GitHub پێش دەرچوونی پرۆسێس
     shutil.rmtree(workdir, ignore_errors=True)
     log.info("bot cycle finished")
 
