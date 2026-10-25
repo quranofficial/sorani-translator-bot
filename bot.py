@@ -60,19 +60,23 @@ TG_CLOUD_BASE     = "https://api.telegram.org"          # پاشەکەوتی ف�
 TG_DATA_DIR       = (os.getenv("TG_DATA_DIR") or "").strip()  # فۆڵدەری داتای سێرڤەری ناوخۆیی لەسەر ڕەسەن (mount)
 TG_BOTAPI_CONTAINER = (os.getenv("TG_BOTAPI_CONTAINER") or "botapi").strip()  # ناوی کۆنتەینەری سێرڤەری ناوخۆیی
 LOCAL_BOT_API     = ("localhost" in TG_BASE) or ("127.0.0.1" in TG_BASE)
-RUN_SECONDS       = env_int("RUN_SECONDS", 2700)     # ماوەی خولی polling (بنەڕەت ٤٥ خولەک)
+RUN_SECONDS       = env_int("RUN_SECONDS", 16200)    # ماوەی خولی polling (بنەڕەت ٢٧٠ خولەک = ٤.٥ کاتژمێر)
 IDLE_EXIT_SECONDS = env_int("IDLE_EXIT_SECONDS", 0)  # 0 = لەکارخراو — بۆت تا کۆتایی خول ئۆنلاین دەمێنێت
 # --- هاوکاتکردنی داواکارییەکان: چەند کەس بە یەک کات داواکاری بکات، هەموویان وەردەگیرێن ---
 MAX_CONCURRENT_JOBS = max(1, env_int("MAX_CONCURRENT_JOBS", 2))  # چەند داواکاری بە هاوکات جێبەجێ بکرێت
 MAX_QUEUE           = max(0, env_int("MAX_QUEUE", 8))            # زۆرترین ڕیزی چاوەڕوانی (0 = بێ ڕیز)
-JOB_DRAIN_SECONDS   = env_int("JOB_DRAIN_SECONDS", 480)          # کاتی چاوەڕوانی بۆ ئەرکەکان لە کۆتایی خول
-HEAVY_BUDGET      = env_int("HEAVY_BUDGET", 2400)    # زۆرترین کات بۆ یەک ڤیدیۆ/دەنگ (چرکە)
+JOB_DRAIN_SECONDS   = env_int("JOB_DRAIN_SECONDS", 1500)         # کاتی چاوەڕوانی بۆ ئەرکەکان لە کۆتایی خول (٢٥ خولەک)
+HEAVY_BUDGET      = env_int("HEAVY_BUDGET", 14400)   # زۆرترین کات بۆ یەک ڤیدیۆ/دەنگ (چرکە — ٤ کاتژمێر)
 MAX_VIDEO_MINUTES = env_int("MAX_VIDEO_MINUTES", 0)  # 0 = بێ سنوور
 BURN_SUBTITLES    = env_int("BURN_SUBTITLES", 1)     # 1 = ژێرنووسی کوردی لەسەر ڤیدیۆ دادەنرێت
-BURN_MAX_MINUTES  = env_int("BURN_MAX_MINUTES", 30)  # زۆرترین درێژی ڤیدیۆ بۆ سووتاندنی ژێرنووس
+BURN_MAX_MINUTES  = env_int("BURN_MAX_MINUTES", 120) # زۆرترین درێژی ڤیدیۆ بۆ سووتاندنی ژێرنووس (٢ کاتژمێر)
 SEND_PDF_COPY     = env_int("SEND_PDF_COPY", 1)      # 1 = کۆپی PDF بۆ هەموو فایلەکان دەنێردرێت
-OUT_VIDEO_MAX_MB  = env_int("OUT_VIDEO_MAX_MB", 20)  # ڤیدیۆی دەرچوو خۆکارانە بۆ خوار ئەم قەبارە بچووک دەکرێتەوە
-SHRINK_OVER_MB    = env_int("SHRINK_OVER_MB", 60)    # ڤیدیۆی گەورەتر لەمە پێش پرۆسێسکردن بۆ 720p بچووک دەکرێتەوە
+# سنووری ڤیدیۆی دەرچوو: لەگەڵ سێرڤەری ناوخۆیی Bot API تا ~2GB دەنێردرێت — بۆیە
+# سنوورێکی گەورەتر (بنەڕەت 400MB) بەکاردێت و پەستاندنی زیادە پێویست نابێت؛
+# لەگەڵ API ی فەرمی (بێ سێرڤەری ناوخۆیی) 20MB وەکو پێشتر.
+OUT_VIDEO_MAX_MB  = env_int("OUT_VIDEO_MAX_MB", 20)             # سنووری دەرچوو — API ی فەرمی
+OUT_VIDEO_LOCAL_MAX_MB = env_int("OUT_VIDEO_LOCAL_MAX_MB", 400) # سنووری دەرچوو — سێرڤەری ناوخۆیی
+SHRINK_OVER_MB    = env_int("SHRINK_OVER_MB", 60)    # (کۆن) بچووکردنەوە ئێستا لەناو هەنگاوی سووتاندن خۆی دەکرێت
 WHISPER_MODEL     = (os.getenv("WHISPER_MODEL") or "base").strip()
 SOURCE_LANG       = (os.getenv("SOURCE_LANG") or "").strip() or None  # None = خۆکار
 GLM_API_KEY       = (os.getenv("GLM_API_KEY") or os.getenv("ZAI_API_KEY") or "").strip()
@@ -173,6 +177,9 @@ CAPTION_DOC     = "وەرگێڕانی کوردی سۆرانی ئامادەیە."
 CAPTION_PDF     = "هەمان وەرگێڕان بە شێوەی PDF."
 MSG_BURN_START   = "ئێستا ژێرنووسی کوردی لەسەر ڤیدیۆکە دادەنێم... (ئەم قۆناغە چەند خولەکێک دەخایەنێت)"
 CAPTION_BURN     = "ڤیدیۆکە بە ژێرنووسی کوردی سۆرانی."
+MSG_VIDEO_TOO_BIG = ("ڤیدیۆکە بە ژێرنووسی کوردی دروستکرا بەڵام قەبارەکەی زۆر گەورەیە بۆ ناردنەوە "
+                     "لە Telegram. تکایە variable ی OUT_VIDEO_LOCAL_MAX_MB کەمتر بکە "
+                     "یان ڤیدیۆکە بە بەشی بچووکتر بنێرە.")
 MSG_BURN_FAIL    = ("بەداخەوە دانانی ژێرنووس لەسەر ڤیدیۆ سەرنەچوو؛ "
                     "بەڵام فایلەکانی SRT و Word و PDF ئامادەن.")
 MSG_BURN_SKIPPED = ("ڤیدیۆکە لە {max} خولەک درێژترە، بۆیە ژێرنووسەکە نەخرایە سەر ڤیدیۆ "
@@ -1997,7 +2004,7 @@ def ffmpeg_extract(src, dst):
     cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src,
            "-vn", "-ac", "1", "-ar", "16000", dst]
     try:
-        res = subprocess.run(cmd, capture_output=True, text=True, timeout=1200)
+        res = subprocess.run(cmd, capture_output=True, text=True, timeout=3600)
     except subprocess.TimeoutExpired:
         raise BotError(ERR_LONG)
     if res.returncode != 0 or not os.path.exists(dst):
@@ -2054,24 +2061,33 @@ def ffprobe_dims(path):
         return 0, 0
 
 
-def compress_video(src, dst, target_mb, workdir, timeout=2400):
+def _encode_budget(target_mb, dur, src_h=0):
+    """بودجەی ئینکۆد بۆ ئامانجی target_mb مێگابایت لە ماوەی dur چرکەدا.
+    (v_kbps, vf, audio_kbps) دەگەڕێنێتەوە — vf (scale) یان None.
+    بەکاردێت لەناو compress_video (دوو-پاس) و burn_subtitles (یەک-پاس)."""
+    target_mb = max(0.3, float(target_mb))
+    dur = max(1.0, float(dur or 0) or 1.0)
+    total_kbps = target_mb * 1024 * 1024 * 8.0 / dur / 1000.0 * 0.96
+    audio_kbps = 96 if dur > 600 else 128
+    v_kbps = max(100, int(total_kbps - audio_kbps))
+    vf = None
+    if src_h:
+        if v_kbps < 350 and src_h > 480:
+            vf = "scale=-2:480"
+        elif v_kbps < 900 and src_h > 720:
+            vf = "scale=-2:720"
+    return v_kbps, vf, audio_kbps
+
+
+def compress_video(src, dst, target_mb, workdir, timeout=7200):
     """بچووککردنەوەی ڤیدیۆ بۆ خوار target_mb مێگابایت — دوو-پاس بە bitrate ی ژمێریارکراو.
     ئەگەر وێنەکە گەورەیە و bitrate کەمە، خۆکارانە بۆ 720p/480p دادەبەزێت.
     ئەگەر سەرکەوتوو نەبوو None دەگەڕێنێتەوە."""
     dur = ffprobe_duration(src)
     if dur <= 0:
         return None
-    target_mb = max(0.3, float(target_mb))
-    audio_kbps = 96
-    v_kbps = int(target_mb * 1024 * 1024 * 8.0 / dur / 1000.0 * 0.96) - audio_kbps
-    v_kbps = max(100, v_kbps)
     _, h = ffprobe_dims(src)
-    vf = None
-    if h:
-        if v_kbps < 350 and h > 480:
-            vf = "scale=-2:480"
-        elif v_kbps < 900 and h > 720:
-            vf = "scale=-2:720"
+    v_kbps, vf, audio_kbps = _encode_budget(target_mb, dur, h or 0)
     passlog = os.path.join(workdir, "x264pass")
 
     def _two_pass(vk, out):
@@ -2252,20 +2268,25 @@ def build_ass_from_srt(srt_path, ass_path, family):
     return ass_path
 
 
-def burn_subtitles(src_video, srt_path, out_path, workdir, timeout=2400, voice_track=None):
+def burn_subtitles(src_video, srt_path, out_path, workdir, timeout=10800, voice_track=None,
+                   target_mb=None, duration=0.0):
     """ژێرنووسی کوردی دەکاتەوە سەر خۆی ڤیدیۆکە (ffmpeg + libass).
     ئەگەر voice_track درابێت، دەنگی کوردی جیگای دەنگی ڕەسەن دادەنرێت.
-    فۆنتی عەرەبی/کوردی لە fontsdir دا دەدۆزرێتەوە. ئەگەر سەرنەچوو None."""
+    فۆنتی عەرەبی/کوردی لە fontsdir دا دەدۆزرێتەوە. ئەگەر سەرنەچوو None.
+
+    target_mb + duration: دۆخی «بودجە» — لە هەمان پاسدا کە ژێرنووسەکە دادەنێت،
+    ڤیدیۆکەش بۆ خوار target_mb مێگابایت بچووک دەکاتەوە (bitrate ی ژمێریارکراو
+    + بچووکردنەوەی خۆکار بۆ 720p/480p) — ئەمە پەستاندنی دووەم لابەردە و بۆ
+    ڤیدیۆی درێژ نیوەی کات پاشەکەوت دەکات."""
     if not shutil.which("ffmpeg"):
         raise BotError(ERR_FFMPEG)
     font_path = ensure_arabic_font(workdir)
     cwd = os.path.abspath(workdir)
     srt_local = os.path.join(cwd, "burn_subs.srt")
     shutil.copyfile(srt_path, srt_local)
-    ext = os.path.splitext(src_video)[1] or ".mp4"
-    src_local = os.path.join(cwd, "burn_src" + ext)
-    if os.path.abspath(src_video) != os.path.abspath(src_local):
-        shutil.copyfile(src_video, src_local)
+    # فایلی سەرچاوە ڕاستەوخۆ بەکاردەهێنین (بێ کۆپی — کۆپی کردنی فایلی 2GB
+    # خولەکێک کات و دوو ئەوەندە دیسکی بێسوود دەبات)
+    src_abs = os.path.abspath(src_video)
     fontsdir = (os.path.dirname(os.path.abspath(font_path))
                 if font_path else "/usr/share/fonts")
     # ١) ڕێگای سەرەکی: فایلی ASS بە ناوی ڕاستەقینەی فۆنت — شێوەدانی پیتەکان
@@ -2285,15 +2306,30 @@ def burn_subtitles(src_video, srt_path, out_path, workdir, timeout=2400, voice_t
         fam = _ass_font_family(font_path) if font_path else "Amiri"
         vf = "subtitles=burn_subs.srt:fontsdir=%s:force_style='%s'" % (
             _ff_quote(fontsdir), _ass_style(fam))
+    # ---- ئەگەر target_mb درابێت: یەک پاس بە bitrate ی ژمێریارکراو + scale ----
+    enc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+    a_bps = "160k"
+    if target_mb and duration and float(duration) > 0:
+        _, h = ffprobe_dims(src_abs)
+        v_kbps, sc_vf, audio_kbps = _encode_budget(target_mb, duration, h or 0)
+        if sc_vf:
+            vf = vf + "," + sc_vf
+        enc = ["-c:v", "libx264", "-preset", "veryfast",
+               "-b:v", "%dk" % v_kbps,
+               "-maxrate", "%dk" % int(v_kbps * 1.45),
+               "-bufsize", "%dk" % (v_kbps * 3)]
+        a_bps = "%dk" % audio_kbps
+        log.info("burn: budget mode (target %.1fMB, %.0fs) -> %dkbps%s",
+                 float(target_mb), float(duration), v_kbps,
+                 (" + " + sc_vf) if sc_vf else "")
     out_tmp = os.path.join(cwd, "burn_out.mp4")
-    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src_local]
+    cmd = ["ffmpeg", "-y", "-loglevel", "error", "-i", src_abs]
     if voice_track and os.path.exists(voice_track):
         # دەنگی کوردی جیگای دەنگی ڕەسەن دەگرێتەوە
         cmd += ["-i", os.path.abspath(voice_track),
                 "-map", "0:v:0", "-map", "1:a:0", "-shortest"]
-    cmd += ["-vf", vf,
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-            "-c:a", "aac", "-b:a", "160k",
+    cmd += ["-vf", vf] + enc + [
+            "-c:a", "aac", "-b:a", a_bps,
             "-movflags", "+faststart", out_tmp]
     try:
         res = subprocess.run(cmd, capture_output=True, text=True,
@@ -2331,6 +2367,11 @@ _whisper_lock = threading.Lock()    # بارکردنی مۆدێل تەنها ی�
 _HARD_DEADLINE = None   # کۆتایی کاتی خول — لە main() دادەنرێت (بۆ ڕاوەستاندنی ئەرکی قورس)
 
 
+def _past_hard_deadline():
+    """True ئەگەر کاتی ڕەهای خول تێپەڕی بێت — هەنگاوی قورسی نوێ دەست پێ ناکات."""
+    return bool(_HARD_DEADLINE and time.time() > _HARD_DEADLINE)
+
+
 def get_whisper():
     """مۆدێلی Whisper — thread-safe بار دەکرێت و بە چەند worker کاردەکات بۆ ئەوەی
     چەند داواکاری بە یەک کات بگۆترێن (num_workers = MAX_CONCURRENT_JOBS)."""
@@ -2364,6 +2405,8 @@ def transcribe_file(wav_path, t0):
         vad_filter=True,
         vad_parameters={"min_silence_duration_ms": 500},
         word_timestamps=True,
+        beam_size=1,                      # greedy — نزیکەی ٢ جار خێراتر لە beam=5
+        condition_on_previous_text=False, # ڕێگری لە لوپسی هەڵە و بەرزکردنەوەی خێرایی
     )
     segs, words = [], []
     for s in seg_iter:
@@ -2637,8 +2680,8 @@ def ytdl_download(url, workdir):
 def run_speech_pipeline(src_path, chat, workdir, state=None):
     t0 = time.time()
     tg_action(chat, "typing")
-    # ---- ئەگەر ڤیدیۆ زۆر گەورەیە، پێش هەموو شتێک بچووکی دەکەینەوە ----
-    src_path = shrink_source_for_processing(src_path, workdir)
+    # تێبینی: بچووکردنەوەی پێشوەخت لابرا — ئێستا سووتاندنی ژێرنووس خۆی بە یەک پاس
+    # هەم ژێرنووس دادەنێت هەم ڤیدیۆ بۆ سنووری قەبارە بچووک دەکاتەوە (target_mb).
     wav = os.path.join(workdir, "audio_16k.wav")
     ffmpeg_extract(src_path, wav)
     tg_send(chat, "دەنگەکە دەخوێنمەوە... (ئەم قۆناغە ماوەیەک دەخایەنێت)")
@@ -2718,21 +2761,31 @@ def run_speech_pipeline(src_path, chat, workdir, state=None):
             log.info("burn skipped: source has no video stream (audio only)")
         elif v_dur and v_dur > BURN_MAX_MINUTES * 60:
             _safe_send(chat, MSG_BURN_SKIPPED.format(max=BURN_MAX_MINUTES))
+        elif _past_hard_deadline():
+            log.warning("burn skipped: hard deadline reached (docs already sent)")
         else:
+            # سنووری قەبارەی دەرچوو: لەگەڵ سێرڤەری ناوخۆیی تا ~2GB دەنێردرێتەوە —
+            # بۆیە سنووری گەورەتر (OUT_VIDEO_LOCAL_MAX_MB) و بێ پەستاندنی دووەم.
+            limit_mb = OUT_VIDEO_LOCAL_MAX_MB if LOCAL_BOT_API else OUT_VIDEO_MAX_MB
+            # خەمڵاندنی قەبارەی CRF23: ~0.4MB بۆ هەر چرکەیەک (~3.2Mbps) —
+            # ئەگەر گەورەتر بوو لە سنوور، سووتاندن لە دۆخی بودجە (یەک پاس) دەکرێت.
+            pred_mb = (v_dur * 0.40) if v_dur else 0.0
+            tgt = limit_mb if (v_dur and pred_mb > limit_mb) else None
             if not voice_track:
                 tg_send(chat, MSG_BURN_START)
             tg_action(chat, "upload_video")
             vid_out = os.path.join(workdir, "sorani_%s_subtitled.mp4" % base)
             try:
                 vid_path = burn_subtitles(src_path, srt_path, vid_out, workdir,
-                                          voice_track=voice_track)
+                                          voice_track=voice_track,
+                                          target_mb=tgt, duration=v_dur)
             except BotError as e:
                 _safe_send(chat, "هەڵە: %s" % e)
                 vid_path = None
             if vid_path and os.path.exists(vid_path):
-                # ---- بچووککردنەوە بۆ خوار OUT_VIDEO_MAX_MB (بنەڕەت ٢٠ مێگابایت) ----
-                limit_mb = OUT_VIDEO_MAX_MB
-                if os.path.getsize(vid_path) > limit_mb * 1024 * 1024:
+                # ---- پەستاندن تەنها وەکو پاشەکەوت (بە کەمی ڕوو دەدات — بودجە لەناو سووتاندنەکە) ----
+                if (os.path.getsize(vid_path) > limit_mb * 1024 * 1024
+                        and not _past_hard_deadline()):
                     _safe_send(chat, MSG_COMPRESS.format(mb=limit_mb))
                     tg_action(chat, "upload_video")
                     small = os.path.join(workdir, "sorani_%s_subtitled_small.mp4" % base)
@@ -2745,10 +2798,11 @@ def run_speech_pipeline(src_path, chat, workdir, state=None):
                     if (cpath and os.path.exists(cpath) and os.path.getsize(cpath) > 0
                             and os.path.getsize(cpath) < os.path.getsize(vid_path)):
                         vid_path = cpath
-                if os.path.getsize(vid_path) <= 49 * 1024 * 1024:
+                lim_send = 1949 if LOCAL_BOT_API else 49
+                if os.path.getsize(vid_path) <= lim_send * 1024 * 1024:
                     tg_send_video(chat, vid_path, CAPTION_BURN)
                 else:
-                    _safe_send(chat, MSG_BURN_FAIL)
+                    _safe_send(chat, MSG_VIDEO_TOO_BIG)
             else:
                 _safe_send(chat, MSG_BURN_FAIL)
 
@@ -3114,9 +3168,12 @@ def self_check():
     print("libreoffice:", shutil.which("soffice") or "missing (ReportLab fallback will be used)")
     print("tesseract OCR:", shutil.which("tesseract") or "missing (scanned PDFs will fail)")
     print("burn subtitles:", ("on, max %d min" % BURN_MAX_MINUTES) if BURN_SUBTITLES else "off")
+    print("cycle: %d min polling + %d min drain | heavy budget: %d min per job"
+          % (RUN_SECONDS // 60, JOB_DRAIN_SECONDS // 60, HEAVY_BUDGET // 60))
     print("concurrency: up to %d parallel job(s), queue up to %d" % (MAX_CONCURRENT_JOBS, MAX_QUEUE))
     print("pdf copy:", "on" if SEND_PDF_COPY else "off")
-    print("output video limit:", "%d MB (auto-compress)" % OUT_VIDEO_MAX_MB)
+    print("output video limit:", "%d MB (local bot api) / %d MB (official api) — auto-compress over limit"
+          % (OUT_VIDEO_LOCAL_MAX_MB, OUT_VIDEO_MAX_MB))
     print("telegram api:", ("LOCAL Bot API server (%s) — files up to 2GB "
           "(server must run with --local / env TELEGRAM_LOCAL=1)" % TG_BASE)
           if LOCAL_BOT_API else "official api.telegram.org — downloads up to 20MB")
@@ -3177,7 +3234,9 @@ def main():
     workdir = tempfile.mkdtemp(prefix="soranibot_")
     start = time.time()
     deadline = start + RUN_SECONDS
-    _HARD_DEADLINE = deadline - 600   # ١٠ خولەک بۆ ناردنەوەی دەرئەنجامەکان حیجز بکە
+    # کۆتایی ڕەهای کارە قورسەکان: دەتوانن بچنە ناو پەنجەرەی drain ەوە (JOB_DRAIN_SECONDS)،
+    # بەڵام ١٠ خولەکی کۆتایی بۆ ناردنەوەی ئەنجامەکان حیجز دەکرێت پێش دەرچوونی پرۆسێس.
+    _HARD_DEADLINE = deadline + JOB_DRAIN_SECONDS - 600
 
     if state.get("offset", 0) <= 0:
         try:
