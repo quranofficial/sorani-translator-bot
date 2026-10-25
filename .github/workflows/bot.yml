@@ -2,8 +2,10 @@
 #  بۆتی وەرگێڕی کوردی سۆرانی — کارکردنی بەردەوام ٢٤/٧ لە GitHub Actions
 #  -------------------------------------------------------------------
 #  چۆن کار دەکات؟
-#   • هەر خولێک ٤٥ خولەکە — بۆتەکە بە بەردەوامی (long polling) پەیامەکان
-#     وەردەگرێت و زۆر بە خێرایی وەڵام دەداتەوە.
+#   • هەر خولێک ٤.٥ کاتژمێرە (270 خولەک) — بۆتەکە بە بەردەوامی (long polling)
+#     پەیامەکان وەردەگرێت و زۆر بە خێرایی وەڵام دەداتەوە.
+#   • خولی درێژ = کارە قورسەکان (ڤیدیۆی درێژ) پێویستیان بە پچڕان نییە —
+#     بودجەی یەک ڤیدیۆ تا ٤ کاتژمێرە (HEAVY_BUDGET).
 #   • لە کۆتایی هەر خولێک، خولێکی نوێ خۆکارانە دەست پێدەکات
 #     (زنجیرەی بێکۆتایی) — بۆیە بۆتەکە هەمیشە ئۆنلاینە.
 #   • cron ی هەر ١٠ خولەک تەنها وەکو پاشەکەوت (backup) کار دەکات
@@ -29,7 +31,7 @@ concurrency:
 jobs:
   run:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 350      # دەبێت لە setup + RUN_SECONDS + drain + ناردنەوە گەورەتر بێت
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -135,7 +137,7 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
-      - name: Run bot (45-minute polling cycle)
+      - name: Run bot (270-minute polling cycle)
         id: bot
         if: steps.guard.outputs.skip != 'true'
         env:
@@ -148,13 +150,15 @@ jobs:
           MAX_VIDEO_MINUTES: ${{ vars.MAX_VIDEO_MINUTES }}
           MAX_CONCURRENT_JOBS: "2"   # چەند داواکاری بە هاوکات جێبەجێ بکرێت (repo ی گشتی ٤ vCPU — دەکرێت ٣)
           MAX_QUEUE: "8"             # زۆرترین ڕیزی چاوەڕوانی پێش پەیامی «ڕیزەکە پڕە»
-          RUN_SECONDS: "2700"
+          RUN_SECONDS: "16200"       # ٢٧٠ خولەک — خولی polling (خولی درێژ = کارە گەورەکان پچڕان ناکەون)
           IDLE_EXIT_SECONDS: "0"
-          HEAVY_BUDGET: "2400"
+          HEAVY_BUDGET: "14400"      # ٤ کاتژمێر بۆ یەک ڤیدیۆ/دەنگ
+          JOB_DRAIN_SECONDS: "1500"  # ٢٥ خولەک چاوەڕوانی بۆ ئەرکەکان لە کۆتایی خول
           BURN_SUBTITLES: "1"
-          BURN_MAX_MINUTES: "30"
+          BURN_MAX_MINUTES: "120"    # تا ڤیدیۆی ٢ کاتژمێر ژێرنووسی لەسەر دادەنرێت
           SEND_PDF_COPY: "1"
-          OUT_VIDEO_MAX_MB: ${{ vars.OUT_VIDEO_MAX_MB || '20' }}
+          OUT_VIDEO_MAX_MB: ${{ vars.OUT_VIDEO_MAX_MB || '20' }}                 # سنووری دەرچوو — API ی فەرمی
+          OUT_VIDEO_LOCAL_MAX_MB: ${{ vars.OUT_VIDEO_LOCAL_MAX_MB || '400' }}   # سنووری دەرچوو — سێرڤەری ناوخۆیی (تا 2GB)
           SHRINK_OVER_MB: ${{ vars.SHRINK_OVER_MB || '60' }}
           TG_API_BASE: ${{ env.TG_API_BASE }}
           KURDISH_TTS_API_KEY: ${{ secrets.KURDISH_TTS_API_KEY }}
