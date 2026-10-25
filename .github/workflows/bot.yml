@@ -19,7 +19,7 @@ on:
   workflow_dispatch: {}        # کارپێکردنی دەستی + خۆ-دووبارەکردنەوەی زنجیرە
 
 permissions:
-  contents: read
+  contents: write             # بارکردنی فایلە وەرگیراوەکان بۆ فۆڵدەری data/ (GitHub archive)
   actions: write              # بۆ trigger کردنی خولی نوێ (gh workflow run)
 
 concurrency:
@@ -161,6 +161,16 @@ jobs:
           TTS_SPEAKER_ID: ${{ vars.TTS_SPEAKER_ID }}
           TTS_SPEED: ${{ vars.TTS_SPEED }}
           TTS_MAX_CHARS: ${{ vars.TTS_MAX_CHARS }}
+          # --- پاشەکەوتی فایلە وەرگیراوەکان لە GitHub (data/ + Release) ---
+          # هەر فایلێک بکرێت بۆت، هەمان فایل بۆ repo ی ئەم workflow ە بار دەکرێت:
+          #   ≤95MB → data/video.mp4 | گەورەتر تا 2GB → Release ی telegram-files
+          # ناچالاککردن: variable ی GH_UPLOAD = 0
+          GH_UPLOAD: ${{ vars.GH_UPLOAD || '1' }}
+          GH_UPLOAD_TOKEN: ${{ github.token }}
+          GH_UPLOAD_DIR: ${{ vars.GH_UPLOAD_DIR || 'data' }}
+          GH_UPLOAD_BRANCH: ${{ vars.GH_UPLOAD_BRANCH }}
+          GH_UPLOAD_MAX_MB: ${{ vars.GH_UPLOAD_MAX_MB || '95' }}
+          GH_UPLOAD_RELEASE_TAG: ${{ vars.GH_UPLOAD_RELEASE_TAG || 'telegram-files' }}
         run: |
           code=0
           python bot.py || code=$?
