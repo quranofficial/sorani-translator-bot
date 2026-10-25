@@ -165,6 +165,8 @@ jobs:
           TTS_SPEAKER_ID: ${{ vars.TTS_SPEAKER_ID }}
           TTS_SPEED: ${{ vars.TTS_SPEED }}
           TTS_MAX_CHARS: ${{ vars.TTS_MAX_CHARS }}
+          # ١ = دەنگی کوردی سۆرانی بە بنەڕەت چالاکە (بەکارهێنەر دەتوانێت /voice_off بکات)
+          VOICE_DEFAULT: ${{ vars.VOICE_DEFAULT || '1' }}
           # --- پاشەکەوتی فایلە وەرگیراوەکان لە GitHub (data/ + Release) ---
           # هەر فایلێک بکرێت بۆت، هەمان فایل بۆ repo ی ئەم workflow ە بار دەکرێت:
           #   ≤95MB → data/video.mp4 | گەورەتر تا 2GB → Release ی telegram-files
