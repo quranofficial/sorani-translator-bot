@@ -29,7 +29,7 @@ jobs:
       - name: Install system font and media tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fonts-noto-core ffmpeg
+          sudo apt-get install -y --no-install-recommends fonts-noto-core ffmpeg tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng
 
       - name: Install Python dependencies
         run: |
