@@ -3438,6 +3438,17 @@ def self_check():
     print("Sorani font:", ("OK — " + os.path.basename(_font)) if _font else "MISSING / no font with complete Sorani glyph coverage")
 
     print("GLM fallback:", ("enabled, models=" + ",".join(GLM_MODELS)) if GLM_API_KEY else "not configured (Google only)")
+    if GLM_API_KEY:
+        try:
+            _sample = "Good morning. How are you? I need help translating this document into Kurdish."
+            _sample_out = _translate_with_fallback(_sample)
+            if not _looks_like_sorani_translation(_sample, _sample_out):
+                raise RuntimeError("sample output did not pass Sorani script validation")
+            print("Sorani translation sample: OK")
+            print("Sample output:", _sample_out[:240])
+        except Exception as _e:
+            print("Sorani translation sample: FAIL —", _e)
+            raise
     print("whisper model:", WHISPER_MODEL, "| max video minutes:", MAX_VIDEO_MINUTES or "unlimited")
     print("ffmpeg:", shutil.which("ffmpeg") or "MISSING")
     print("libreoffice:", shutil.which("soffice") or "missing (ReportLab fallback will be used)")
