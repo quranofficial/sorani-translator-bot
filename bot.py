@@ -1111,7 +1111,7 @@ def _looks_like_sorani_translation(source, translated):
         return False
     source = source or ""
     latin_letters = sum(1 for c in source if ("a" <= c.lower() <= "z"))
-    arabic_letters = sum(1 for c in out if "\\u0600" <= c <= "\\u06ff" or "\\u0750" <= c <= "\\u077f")
+    arabic_letters = sum(1 for c in out if "\u0600" <= c <= "\u06ff" or "\u0750" <= c <= "\u077f")
     # Do not impose a script test on already Arabic-script source passages.
     if latin_letters >= 3 and arabic_letters == 0:
         return False
@@ -1132,7 +1132,7 @@ def _translate_with_fallback(chunk):
         except Exception as ge:
             log.warning("GLM Sorani translation unavailable/invalid (%s); trying Google fallback", ge)
     try:
-        out, _src = _gtx_translate(chunk), ""
+        out = _gtx_translate(chunk)
         if not _looks_like_sorani_translation(chunk, out):
             raise RuntimeError("Google output failed Sorani-script/unchanged-text validation")
         return out
