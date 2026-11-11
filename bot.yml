@@ -169,7 +169,6 @@ jobs:
           OUT_VIDEO_MAX_MB: ${{ vars.OUT_VIDEO_MAX_MB || '20' }}                 # سنووری دەرچوو — API ی فەرمی
           OUT_VIDEO_LOCAL_MAX_MB: ${{ vars.OUT_VIDEO_LOCAL_MAX_MB || '400' }}   # سنووری دەرچوو — سێرڤەری ناوخۆیی (تا 2GB)
           SHRINK_OVER_MB: ${{ vars.SHRINK_OVER_MB || '60' }}
-          TG_API_BASE: ${{ env.TG_API_BASE }}
           KURDISH_TTS_API_KEY: ${{ secrets.KURDISH_TTS_API_KEY }}
           TTS_SPEAKER_ID: ${{ vars.TTS_SPEAKER_ID }}
           TTS_SPEED: ${{ vars.TTS_SPEED }}
