@@ -8,8 +8,7 @@
 #     بودجەی یەک ڤیدیۆ تا ٤ کاتژمێرە (HEAVY_BUDGET).
 #   • لە کۆتایی هەر خولێک، خولێکی نوێ خۆکارانە دەست پێدەکات
 #     (زنجیرەی بێکۆتایی) — بۆیە بۆتەکە هەمیشە ئۆنلاینە.
-#   • cron ی هەر ١٠ خولەک تەنها وەکو پاشەکەوت (backup) کار دەکات
-#     ئەگەر زنجیرەکە بپچڕێت.
+#   • watchdog ی جیاواز هەر ١٥ خولەک پشکنین دەکات و خولی وەستاو دەگەڕێنێتەوە.
 #   • concurrency دڵنیا دەکات کە تەنها یەک خول بە یەک کات کار بکات.
 # =====================================================================
 
@@ -134,6 +133,15 @@ jobs:
       - name: Install dependencies
         if: steps.guard.outputs.skip != 'true'
         run: pip install -r requirements.txt
+
+      - name: Validate Python, required secrets and Sorani font
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$BOT_TOKEN" || { echo "::error::BOT_TOKEN secret is missing"; exit 1; }
+          python -m py_compile bot.py
+          python bot.py --check
 
       - name: Run bot (270-minute polling cycle)
         id: bot
