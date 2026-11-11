@@ -3402,6 +3402,9 @@ def wait_for_jobs(timeout):
 def self_check():
     print("== sorani-translator-bot :: self check ==")
     print("BOT_TOKEN:", "set" if BOT_TOKEN else "MISSING (add GitHub secret)")
+    _font = ensure_arabic_font(tempfile.gettempdir())
+    print("Sorani font:", ("OK — " + os.path.basename(_font)) if _font else "MISSING / no font with complete Sorani glyph coverage")
+
     print("GLM fallback:", ("enabled, models=" + ",".join(GLM_MODELS)) if GLM_API_KEY else "not configured (Google only)")
     print("whisper model:", WHISPER_MODEL, "| max video minutes:", MAX_VIDEO_MINUTES or "unlimited")
     print("ffmpeg:", shutil.which("ffmpeg") or "MISSING")
