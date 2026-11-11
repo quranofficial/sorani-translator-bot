@@ -3189,7 +3189,7 @@ def ocr_image_text(path):
     try:
         langs = subprocess.run(["tesseract", "--list-langs"], capture_output=True,
                                text=True, timeout=30).stdout.splitlines()
-        langs = [x.strip() for x in langs if x.strip() and x.strip() != "List of available languages:"]
+        langs = [x.strip() for x in langs if x.strip() and not x.strip().lower().startswith("list of available languages")]
         selected = [x for x in langs if x.lower() != "osd"]
         lang_arg = "+".join(selected) if selected else "eng"
         proc = subprocess.run(["tesseract", path, "stdout", "-l", lang_arg, "--psm", "3"],
