@@ -137,11 +137,14 @@ jobs:
       - name: Validate Python, required secrets and Sorani font
         env:
           BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+          GLM_API_KEY: ${{ secrets.ZAI_API_KEY }}
+          KURDISH_TTS_API_KEY: ${{ secrets.KURDISH_TTS_API_KEY }}
         run: |
           set -euo pipefail
           test -n "$BOT_TOKEN" || { echo "::error::BOT_TOKEN secret is missing"; exit 1; }
           python -m py_compile bot.py
-          python bot.py --check
+          python bot.py --check | tee startup-check.log
+          grep -q "Sorani font: OK" startup-check.log || { echo "::error::No font with complete Sorani glyph coverage"; exit 1; }
 
       - name: Run bot (270-minute polling cycle)
         id: bot
