@@ -302,11 +302,18 @@ ERR_TRANS       = ("وەرگێڕان سەرنەچوو — گووگڵ و GLM هە
 ERR_GEN         = "هەڵەیەکی نەخوازراو ڕوویدا. تکایە دووبارە هەوڵ بدە."
 
 GLM_PROMPT = (
-    "You are a professional translator specialized in Central Kurdish "
-    "(Sorani, ISO 639-3: ckb, written in Arabic script). Translate the user's "
-    "text into natural, fluent Sorani Kurdish. Preserve the original paragraph "
-    "structure and line breaks. Output ONLY the translated text — no "
-    "explanations, no quotes, no extra commentary."
+    "You are an expert native-level translator and editor for Central Kurdish "
+    "(Sorani, ISO 639-3 ckb), specifically the standard Sorani used in Iraqi "
+    "Kurdistan. Your target is Sorani, NOT Kurmanji (Northern Kurdish), NOT "
+    "Persian, and NOT Arabic. Write exclusively in natural Sorani using the "
+    "Kurdish Arabic-based script and correct Sorani letters: ڕ ڵ ێ ە ۆ گ چ پ ژ ڤ. "
+    "Use idiomatic Sorani grammar, word order, vocabulary and natural phrasing; "
+    "avoid literal word-for-word translation and avoid Kurmanji vocabulary or "
+    "Latin transliteration. Preserve the complete meaning, facts, names, numbers, "
+    "dates, URLs, formatting, paragraph structure and line breaks. Do not omit, "
+    "summarize, add facts, or explain. If the source contains technical terms, "
+    "use the accepted Sorani equivalent and keep the original in parentheses "
+    "only when needed for clarity. Return ONLY the Sorani translation."
 )
 
 DOC_EXTS  = {".pdf", ".docx", ".pptx", ".txt", ".srt"}
@@ -1097,15 +1104,40 @@ def chunk_text(text, size=2800):
     return [c for c in chunks if c]
 
 
+def _looks_like_sorani_translation(source, translated):
+    """Reject empty/unchanged Latin output when Sorani Arabic-script output is expected."""
+    out = (translated or "").strip()
+    if not out:
+        return False
+    source = source or ""
+    latin_letters = sum(1 for c in source if ("a" <= c.lower() <= "z"))
+    arabic_letters = sum(1 for c in out if "\\u0600" <= c <= "\\u06ff" or "\\u0750" <= c <= "\\u077f")
+    # Do not impose a script test on already Arabic-script source passages.
+    if latin_letters >= 3 and arabic_letters == 0:
+        return False
+    if latin_letters >= 3 and out.casefold() == source.strip().casefold():
+        return False
+    return True
+
+
 def _translate_with_fallback(chunk):
+    # GLM-4.5-Flash is attempted first because it follows Sorani dialect instructions
+    # better than the basic Google endpoint. Google remains a free availability fallback.
+    if GLM_API_KEY:
+        try:
+            out = _glm_once(chunk)
+            if not _looks_like_sorani_translation(chunk, out):
+                raise RuntimeError("GLM output failed Sorani-script/unchanged-text validation")
+            return out
+        except Exception as ge:
+            log.warning("GLM Sorani translation unavailable/invalid (%s); trying Google fallback", ge)
     try:
-        return _gtx_translate(chunk)
-    except Exception as ge:
-        log.warning("all Google routes failed (%s), trying GLM fallback", ge)
-    try:
-        return _glm_once(chunk)
+        out, _src = _gtx_translate(chunk), ""
+        if not _looks_like_sorani_translation(chunk, out):
+            raise RuntimeError("Google output failed Sorani-script/unchanged-text validation")
+        return out
     except Exception as e:
-        log.error("GLM fallback failed: %s", e)
+        log.error("all Sorani translation providers failed: %s", e)
         raise BotError(ERR_TRANS)
 
 
