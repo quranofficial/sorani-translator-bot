@@ -8,17 +8,14 @@
 #     بودجەی یەک ڤیدیۆ تا ٤ کاتژمێرە (HEAVY_BUDGET).
 #   • لە کۆتایی هەر خولێک، خولێکی نوێ خۆکارانە دەست پێدەکات
 #     (زنجیرەی بێکۆتایی) — بۆیە بۆتەکە هەمیشە ئۆنلاینە.
-#   • cron ی هەر ١٠ خولەک تەنها وەکو پاشەکەوت (backup) کار دەکات
-#     ئەگەر زنجیرەکە بپچڕێت.
+#   • watchdog ی جیاواز هەر ١٥ خولەک پشکنین دەکات و خولی وەستاو دەگەڕێنێتەوە.
 #   • concurrency دڵنیا دەکات کە تەنها یەک خول بە یەک کات کار بکات.
 # =====================================================================
 
 name: Sorani Translator Bot
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"    # تەنها backup — زنجیرەی سەرەکی خۆی خول دروست دەکات
-  workflow_dispatch: {}        # کارپێکردنی دەستی + خۆ-دووبارەکردنەوەی زنجیرە
+  workflow_dispatch: {}        # دەستی + زنجیرەی خۆکار
 
 permissions:
   contents: write             # بارکردنی فایلە وەرگیراوەکان بۆ فۆڵدەری data/ (GitHub archive)
@@ -137,6 +134,15 @@ jobs:
         if: steps.guard.outputs.skip != 'true'
         run: pip install -r requirements.txt
 
+      - name: Validate Python, required secrets and Sorani font
+        env:
+          BOT_TOKEN: ${{ secrets.BOT_TOKEN }}
+        run: |
+          set -euo pipefail
+          test -n "$BOT_TOKEN" || { echo "::error::BOT_TOKEN secret is missing"; exit 1; }
+          python -m py_compile bot.py
+          python bot.py --check
+
       - name: Run bot (270-minute polling cycle)
         id: bot
         if: steps.guard.outputs.skip != 'true'
@@ -207,4 +213,13 @@ jobs:
             echo "retry $i failed — waiting 20s"
             sleep 20
           done
-          echo "::warning::could not trigger next cycle; cron backup will recover within ~10 min"
+          echo "::warning::could not trigger next cycle; 15-minute watchdog will retry"
+
+      - name: Upload diagnostic logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sorani-bot-logs-${{ github.run_id }}
+          path: bot.log
+          if-no-files-found: warn
+          retention-days: 14
