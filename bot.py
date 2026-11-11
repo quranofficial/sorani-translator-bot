@@ -128,7 +128,7 @@ GH_RELEASE_MAX_MB = 2000                            # سنووری ڕەهای Gi
 TG_API = TG_BASE + "/bot" + BOT_TOKEN
 TG_MAX_FILE = (2000 if LOCAL_BOT_API else 20) * 1024 * 1024
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s", handlers=[logging.StreamHandler(sys.stdout), logging.FileHandler("bot.log", encoding="utf-8")])
 log = logging.getLogger("sorani-bot")
 
 SESSION = requests.Session()
@@ -1377,12 +1377,13 @@ def _disp(s):
 # پاشان ڕێڕەوی سیستەم (لە Actions بە apt دامەزرێت)، لە کۆتاییدا داگرتن لە ئینتەرنێت
 REPO_FONTS_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "fonts")
 FONT_CANDIDATES = [
-    os.path.join(REPO_FONTS_DIR, "NotoNaskhArabic-Regular.ttf"),
-    os.path.join(REPO_FONTS_DIR, "Amiri-Regular.ttf"),
+    # Noto Sans Arabic is preferred for clear modern Sorani text; Naskh is fallback.
+    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
     "/usr/share/fonts/truetype/noto/NotoNaskhArabic-Regular.ttf",
     "/usr/share/fonts/opentype/noto/NotoNaskhArabic-Regular.ttf",
+    os.path.join(REPO_FONTS_DIR, "NotoNaskhArabic-Regular.ttf"),
+    os.path.join(REPO_FONTS_DIR, "Amiri-Regular.ttf"),
     "/usr/share/fonts/truetype/amiri/Amiri-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
 ]
 FONT_URLS = [
     "https://github.com/google/fonts/raw/main/ofl/amiri/Amiri-Regular.ttf",
@@ -1391,15 +1392,33 @@ FONT_URLS = [
 ]
 
 
+SORANI_REQUIRED_GLYPHS = "پچژڕڵڤگەێۆ"
+
+def _font_supports_sorani(path):
+    """پشکنینی ئەوەی فۆنتەکە هەموو پیتە تایبەتەکانی سۆرانی هەیە."""
+    try:
+        from fontTools.ttLib import TTFont as _TTFont
+        cmap = set((_TTFont(path, fontNumber=0).getBestCmap() or {}).keys())
+        missing = [ch for ch in SORANI_REQUIRED_GLYPHS if ord(ch) not in cmap]
+        if missing:
+            log.warning("font %s misses Sorani glyphs: %s", os.path.basename(path), " ".join(missing))
+            return False
+        return True
+    except Exception as e:
+        log.warning("could not validate Sorani glyph coverage for %s: %s", path, e)
+        return False
+
+
 def ensure_arabic_font(workdir):
     for p in FONT_CANDIDATES:
-        if os.path.exists(p):
+        if os.path.exists(p) and _font_supports_sorani(p):
+            log.info("using Sorani-compatible font: %s", p)
             return p
     fdir = os.path.join(workdir, "fonts")
     os.makedirs(fdir, exist_ok=True)
     fp = os.path.join(fdir, "arabic.ttf")
-    if os.path.exists(fp) and os.path.getsize(fp) > 100_000:
-        return fp            # فۆنتەکە پێشتر دابەزیوە — دووبارە داگری ناکەین
+    if os.path.exists(fp) and os.path.getsize(fp) > 100_000 and _font_supports_sorani(fp):
+        return fp            # فۆنتەکە پێشتر دابەزیوە و پیتەکانی سۆرانی پشتگیری دەکات
     for url in FONT_URLS:
         try:
             r = SESSION.get(url, timeout=90)
@@ -1407,8 +1426,10 @@ def ensure_arabic_font(workdir):
             if len(r.content) > 100_000:
                 with open(fp, "wb") as fh:
                     fh.write(r.content)
-                log.info("downloaded Arabic font from %s", url)
-                return fp
+                if _font_supports_sorani(fp):
+                    log.info("downloaded Sorani-compatible Arabic font from %s", url)
+                    return fp
+                log.warning("downloaded font does not cover all Sorani letters: %s", url)
         except Exception as e:
             log.warning("font download failed %s: %s", url, e)
     return None
