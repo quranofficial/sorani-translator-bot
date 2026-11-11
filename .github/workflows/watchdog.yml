@@ -1,6 +1,8 @@
 name: Sorani Bot Watchdog
 
 on:
+  push:
+    branches: [main]
   schedule:
     # Every 15 minutes, offset from the top of the hour to reduce schedule delays.
     - cron: "7,22,37,52 * * * *"
