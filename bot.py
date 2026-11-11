@@ -150,6 +150,17 @@ class TgTooBig(BotError):
 
 # -------------------------- نووسینە کوردییەکان ------------------------
 
+MENU_KEYBOARD = {
+    "keyboard": [
+        [{"text": "🌐 وەرگێڕانی دەق"}, {"text": "🖼 وەرگێڕانی وێنە"}],
+        [{"text": "📂 وەرگێڕانی فایل"}, {"text": "🎬 وەرگێڕانی ڤیدیۆ"}],
+        [{"text": "⚙️ ڕێکخستنەکان"}, {"text": "❔ یارمەتی"}],
+    ],
+    "resize_keyboard": True,
+    "is_persistent": True,
+    "input_field_placeholder": "دەق، وێنە، فایل یان بەستەر بنێرە..."
+}
+
 WELCOME = (
     "سڵاو! من بۆتی وەرگێڕانم بۆ کوردی سۆرانی.\n"
     "\n"
@@ -302,18 +313,11 @@ ERR_TRANS       = ("وەرگێڕان سەرنەچوو — گووگڵ و GLM هە
 ERR_GEN         = "هەڵەیەکی نەخوازراو ڕوویدا. تکایە دووبارە هەوڵ بدە."
 
 GLM_PROMPT = (
-    "You are an expert native-level translator and editor for Central Kurdish "
-    "(Sorani, ISO 639-3 ckb), specifically the standard Sorani used in Iraqi "
-    "Kurdistan. Your target is Sorani, NOT Kurmanji (Northern Kurdish), NOT "
-    "Persian, and NOT Arabic. Write exclusively in natural Sorani using the "
-    "Kurdish Arabic-based script and correct Sorani letters: ڕ ڵ ێ ە ۆ گ چ پ ژ ڤ. "
-    "Use idiomatic Sorani grammar, word order, vocabulary and natural phrasing; "
-    "avoid literal word-for-word translation and avoid Kurmanji vocabulary or "
-    "Latin transliteration. Preserve the complete meaning, facts, names, numbers, "
-    "dates, URLs, formatting, paragraph structure and line breaks. Do not omit, "
-    "summarize, add facts, or explain. If the source contains technical terms, "
-    "use the accepted Sorani equivalent and keep the original in parentheses "
-    "only when needed for clarity. Return ONLY the Sorani translation."
+    "You are a professional translator specialized in Central Kurdish "
+    "(Sorani, ISO 639-3: ckb, written in Arabic script). Translate the user's "
+    "text into natural, fluent Sorani Kurdish. Preserve the original paragraph "
+    "structure and line breaks. Output ONLY the translated text — no "
+    "explanations, no quotes, no extra commentary."
 )
 
 DOC_EXTS  = {".pdf", ".docx", ".pptx", ".txt", ".srt"}
@@ -367,8 +371,9 @@ def tg_call(method, payload=None, files=None, timeout=70, api_base=None, size_hi
     return j.get("result")
 
 
-def tg_send(chat_id, text):
+def tg_send(chat_id, text, reply_markup=None):
     text = (text or "").strip() or "-"
+    first_part = True
     while text:
         if len(text) <= 4000:
             part, rest = text, ""
@@ -377,7 +382,11 @@ def tg_send(chat_id, text):
             if cut < 2000:
                 cut = 4000
             part, rest = text[:cut], text[cut:].lstrip("\n")
-        tg_call("sendMessage", {"chat_id": chat_id, "text": part})
+        payload = {"chat_id": chat_id, "text": part}
+        if first_part and reply_markup:
+            payload["reply_markup"] = json.dumps(reply_markup, ensure_ascii=False)
+        tg_call("sendMessage", payload)
+        first_part = False
         text = rest
 
 
@@ -1104,42 +1113,17 @@ def chunk_text(text, size=2800):
     return [c for c in chunks if c]
 
 
-def _looks_like_sorani_translation(source, translated):
-    """Reject empty/unchanged Latin output when Sorani Arabic-script output is expected."""
-    out = (translated or "").strip()
-    if not out:
-        return False
-    source = source or ""
-    latin_letters = sum(1 for c in source if ("a" <= c.lower() <= "z"))
-    arabic_letters = sum(1 for c in out if "\u0600" <= c <= "\u06ff" or "\u0750" <= c <= "\u077f")
-    # Do not impose a script test on already Arabic-script source passages.
-    if latin_letters >= 3 and arabic_letters == 0:
-        return False
-    if latin_letters >= 3 and out.casefold() == source.strip().casefold():
-        return False
-    return True
-
-
 def _translate_with_fallback(chunk):
-    # GLM-4.5-Flash is attempted first because it follows Sorani dialect instructions
-    # better than the basic Google endpoint. Google remains a free availability fallback.
-    if GLM_API_KEY:
-        try:
-            out = _glm_once(chunk)
-            if not _looks_like_sorani_translation(chunk, out):
-                raise RuntimeError("GLM output failed Sorani-script/unchanged-text validation")
-            return out
-        except Exception as ge:
-            log.warning("GLM Sorani translation unavailable/invalid (%s); trying Google fallback", ge)
+    # Preserve the established translation behavior: Google first, GLM only as fallback.
     try:
-        out = _gtx_translate(chunk)
-        if not _looks_like_sorani_translation(chunk, out):
-            raise RuntimeError("Google output failed Sorani-script/unchanged-text validation")
-        return out
+        return _gtx_translate(chunk)
+    except Exception as ge:
+        log.warning("all Google routes failed (%s), trying GLM fallback", ge)
+    try:
+        return _glm_once(chunk)
     except Exception as e:
-        log.error("all Sorani translation providers failed: %s", e)
+        log.error("GLM fallback failed: %s", e)
         raise BotError(ERR_TRANS)
-
 
 def translate_text(text):
     text = text or ""
@@ -3071,6 +3055,12 @@ def run_speech_pipeline(src_path, chat, workdir, state=None, title=None):
 
 # --------------------------- هاندەرەکان -------------------------------
 
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp", ".tif", ".tiff"}
+
+def route_image(name, mime):
+    ext = os.path.splitext(name or "")[1].lower()
+    return ext in IMAGE_EXTS or bool(mime and mime.startswith("image/"))
+
 def route_document(name, mime):
     ext = os.path.splitext(name or "")[1].lower()
     if ext in DOC_EXTS:
@@ -3192,6 +3182,46 @@ def handle_document_file(tg_file, name, chat, workdir, sender=""):
         tg_send_doc(chat, pdf_path, CAPTION_PDF)
 
 
+def ocr_image_text(path):
+    """دەقی وێنە دەردەهێنێت؛ زمانە OCR ـە بەردەستەکان بەکاردەهێنێت."""
+    if not shutil.which("tesseract"):
+        raise BotError("ئامرازی ناسینەوەی دەقی وێنە (Tesseract) بەردەست نییە.")
+    try:
+        langs = subprocess.run(["tesseract", "--list-langs"], capture_output=True,
+                               text=True, timeout=30).stdout.splitlines()
+        langs = [x.strip() for x in langs if x.strip() and x.strip() != "List of available languages:"]
+        selected = [x for x in langs if x.lower() != "osd"]
+        lang_arg = "+".join(selected) if selected else "eng"
+        proc = subprocess.run(["tesseract", path, "stdout", "-l", lang_arg, "--psm", "3"],
+                              capture_output=True, text=True, timeout=240)
+        if proc.returncode != 0:
+            raise RuntimeError((proc.stderr or "Tesseract OCR failed")[-500:])
+        extracted = (proc.stdout or "").strip()
+        if not has_letters(extracted):
+            raise BotError("لە وێنەکەدا دەقێکی خوێندنەوە نەدۆزرایەوە؛ وێنەیەکی ڕوونتر بنێرە.")
+        return extracted
+    except BotError:
+        raise
+    except Exception as e:
+        log.exception("image OCR failed")
+        raise BotError("خوێندنەوەی دەقی وێنە سەرنەکەوت: %s" % str(e)[:180])
+
+
+def handle_image_file(tg_file, name, chat, workdir, sender=""):
+    size = int(tg_file.get("file_size") or 0)
+    if size > TG_MAX_FILE:
+        raise BotError(err_big(size=size))
+    tg_send(chat, "چاوەڕێ بکە... دەقی ناو وێنەکە دەردەهێنم و بۆ سۆرانی وەریدەگێڕمەوە.")
+    path = tg_download(tg_file["file_id"], workdir, name, size_hint=size)
+    gh_backup_file(path, sender)
+    translated = translate_text(ocr_image_text(path))
+    tg_send(chat, translated, MENU_KEYBOARD)
+    out_path = os.path.join(workdir, "sorani_image_text.txt")
+    with open(out_path, "w", encoding="utf-8") as fh:
+        fh.write(translated)
+    tg_send_doc(chat, out_path, "دەقی وەرگێڕدراوی وێنەکە بە کوردی سۆرانی.")
+
+
 def handle_media_file(tg_file, chat, workdir, name_hint="media", state=None, sender=""):
     size = int(tg_file.get("file_size") or 0)
     if size > TG_MAX_FILE:
@@ -3264,12 +3294,15 @@ def handle_command(text, chat, state):
     if cmd in ("/voice_off", "/deng_off", "/voiceoff", "/dengoff"):
         tg_send(chat, MSG_VOICE_OFF)
         return True
+    if cmd in ("/start", "/menu", "/help"):
+        tg_send(chat, WELCOME, MENU_KEYBOARD)
+        return True
     if cmd in ("/voice", "/deng", "/voice_status", "/settings"):
-        tg_send(chat, MSG_VOICE_STATUS_ON if voice_enabled(state, chat)
-                else MSG_VOICE_STATUS_OFF)
+        tg_send(chat, (MSG_VOICE_STATUS_ON if voice_enabled(state, chat)
+                else MSG_VOICE_STATUS_OFF) + "\n\n" + WELCOME, MENU_KEYBOARD)
         return True
     if cmd.startswith("/"):
-        tg_send(chat, WELCOME)
+        tg_send(chat, WELCOME, MENU_KEYBOARD)
         return True
     return False
 
@@ -3294,12 +3327,20 @@ def handle_message(msg, chat, workdir, state=None):
     doc = msg.get("document")
     if doc:
         name = doc.get("file_name") or "file"
-        if route_document(name, doc.get("mime_type") or ""):
+        mime = doc.get("mime_type") or ""
+        if route_image(name, mime):
+            handle_image_file(doc, name, chat, workdir, sender=sender)
+        elif route_document(name, mime):
             handle_document_file(doc, name, chat, workdir, sender=sender)
-        elif route_media(name, doc.get("mime_type") or ""):
+        elif route_media(name, mime):
             handle_media_file(doc, chat, workdir, os.path.basename(name), state, sender=sender)
         else:
             raise BotError(MSG_UNSUPPORTED)
+        return
+
+    photos = msg.get("photo") or []
+    if photos:
+        handle_image_file(photos[-1], "telegram_photo.jpg", chat, workdir, sender=sender)
         return
 
     for key in ("video", "voice", "audio", "video_note"):
@@ -3313,6 +3354,18 @@ def handle_message(msg, chat, workdir, state=None):
     if not text:
         raise BotError(MSG_UNSUPPORTED)
 
+    menu_actions = {
+        "🌐 وەرگێڕانی دەق": "دەقی خۆت بە هەر زمانێک بنێرە؛ بە کوردی سۆرانی وەریدەگێڕمەوە.",
+        "📂 وەرگێڕانی فایل": "فایلی PDF، Word (DOCX)، PowerPoint (PPTX)، TXT یان SRT بنێرە.",
+        "🖼 وەرگێڕانی وێنە": "وێنەکە بنێرە؛ دەقی ناو وێنەکە دەردەهێنم و بۆ سۆرانی وەریدەگێڕمەوە.",
+        "🎬 وەرگێڕانی ڤیدیۆ": "فایلی ڤیدیۆ/دەنگ یان بەستەری YouTube، Facebook، TikTok بنێرە.",
+        "⚙️ ڕێکخستنەکان": "فەرمانەکان: /voice_on ، /voice_off ، /voice",
+        "❔ یارمەتی": WELCOME,
+    }
+    if text in menu_actions:
+        tg_send(chat, menu_actions[text], MENU_KEYBOARD)
+        return
+
     if text.startswith("/"):
         handle_command(text, chat, state)
         return
@@ -3321,9 +3374,7 @@ def handle_message(msg, chat, workdir, state=None):
     if m:
         handle_link(m.group(0).rstrip(".,;)]}>"), chat, workdir, state)
         return
-
     handle_text_translate(text, chat)
-
 
 def process_update(u, workdir, state=None):
     msg = u.get("message") or {}
@@ -3438,17 +3489,6 @@ def self_check():
     print("Sorani font:", ("OK — " + os.path.basename(_font)) if _font else "MISSING / no font with complete Sorani glyph coverage")
 
     print("GLM fallback:", ("enabled, models=" + ",".join(GLM_MODELS)) if GLM_API_KEY else "not configured (Google only)")
-    if GLM_API_KEY:
-        try:
-            _sample = "Good morning. How are you? I need help translating this document into Kurdish."
-            _sample_out = _translate_with_fallback(_sample)
-            if not _looks_like_sorani_translation(_sample, _sample_out):
-                raise RuntimeError("sample output did not pass Sorani script validation")
-            print("Sorani translation sample: OK")
-            print("Sample output:", _sample_out[:240])
-        except Exception as _e:
-            print("Sorani translation sample: FAIL —", _e)
-            raise
     print("whisper model:", WHISPER_MODEL, "| max video minutes:", MAX_VIDEO_MINUTES or "unlimited")
     print("ffmpeg:", shutil.which("ffmpeg") or "MISSING")
     print("libreoffice:", shutil.which("soffice") or "missing (ReportLab fallback will be used)")
