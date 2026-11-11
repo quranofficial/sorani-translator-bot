@@ -1,0 +1,37 @@
+name: Sorani Bot Watchdog
+
+on:
+  schedule:
+    # Every 15 minutes, offset from the top of the hour to reduce schedule delays.
+    - cron: "7,22,37,52 * * * *"
+  workflow_dispatch: {}
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: sorani-bot-watchdog
+  cancel-in-progress: true
+
+jobs:
+  watchdog:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Check bot workflow and recover if stopped
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          active="$(gh run list --repo "$GH_REPO" --workflow bot.yml --status in_progress --limit 50 --json databaseId --jq 'length')"
+          queued="$(gh run list --repo "$GH_REPO" --workflow bot.yml --status queued --limit 50 --json databaseId --jq 'length')"
+          echo "Bot workflow status: active=$active queued=$queued"
+          if [ "$active" -gt 0 ] || [ "$queued" -gt 0 ]; then
+            echo "Bot is already running or queued; no duplicate dispatch."
+            exit 0
+          fi
+          echo "::warning::No active bot run found. Dispatching recovery run."
+          gh workflow run bot.yml --repo "$GH_REPO" --ref main
+          echo "Recovery dispatch accepted by GitHub."
