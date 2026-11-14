@@ -10,6 +10,5 @@ Pillow>=10.0.0
 fonttools>=4.40.0
 torch>=2.2.0
 transformers>=4.50.0
-librosa>=0.10.2
 soundfile>=0.12.1
 sentencepiece>=0.2.0
