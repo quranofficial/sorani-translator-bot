@@ -81,6 +81,11 @@ OUT_VIDEO_MAX_MB  = env_int("OUT_VIDEO_MAX_MB", 20)             # سنووری �
 OUT_VIDEO_LOCAL_MAX_MB = env_int("OUT_VIDEO_LOCAL_MAX_MB", 400) # سنووری دەرچوو — سێرڤەری ناوخۆیی
 SHRINK_OVER_MB    = env_int("SHRINK_OVER_MB", 60)    # (کۆن) بچووکردنەوە ئێستا لەناو هەنگاوی سووتاندن خۆی دەکرێت
 ASR_MODEL         = (os.getenv("ASR_MODEL") or "RawaHazhar/sorani-asr").strip()
+ASR_USE_LM        = (os.getenv("ASR_USE_LM") or "1").strip().lower() not in ("0", "false", "no", "off")
+ASR_LM_FILE       = (os.getenv("ASR_LM_FILE") or "sorani5_clean3.bin").strip()
+ASR_LM_ALPHA      = float((os.getenv("ASR_LM_ALPHA") or "0.5").strip() or "0.5")
+ASR_LM_BETA       = float((os.getenv("ASR_LM_BETA") or "1.0").strip() or "1.0")
+ASR_BEAM_WIDTH    = max(1, env_int("ASR_BEAM_WIDTH", 100))
 SOURCE_LANG       = (os.getenv("SOURCE_LANG") or "").strip() or None  # None = خۆکار
 GLM_API_KEY       = (os.getenv("GLM_API_KEY") or os.getenv("ZAI_API_KEY") or "").strip()
 GLM_API_URL       = (os.getenv("GLM_API_URL") or "https://api.z.ai/api/paas/v4").strip().rstrip("/")
@@ -2597,6 +2602,8 @@ def tg_send_video(chat, path, caption=None):
 _asr_model = None
 _asr_tokenizer = None
 _asr_feature_extractor = None
+_asr_decoder = None
+_asr_lm_attempted = False
 _asr_load_lock = threading.Lock()
 _asr_inference_lock = threading.Lock()
 _HARD_DEADLINE = None
@@ -2608,8 +2615,9 @@ def _past_hard_deadline():
 
 
 def get_asr():
-    """بارکردنی مۆدێلی ڕەسەنی Rawa Hazhar ـی Sorani ASR، تەنها یەک جار."""
+    """بارکردنی مۆدێلی ڕەسەنی Rawa Hazhar و KenLM، تەنها یەک جار."""
     global _asr_model, _asr_tokenizer, _asr_feature_extractor
+    global _asr_decoder, _asr_lm_attempted
     if _asr_model is None:
         with _asr_load_lock:
             if _asr_model is None:
@@ -2619,14 +2627,46 @@ def get_asr():
                     Wav2Vec2CTCTokenizer,
                     SeamlessM4TFeatureExtractor,
                 )
-                log.info("loading Sorani ASR model: %s on CPU", ASR_MODEL)
+                log.info("loading Sorani ASR acoustic model: %s on CPU", ASR_MODEL)
                 torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
                 _asr_tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(ASR_MODEL)
                 _asr_feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(ASR_MODEL)
                 _asr_model = Wav2Vec2BertForCTC.from_pretrained(
                     ASR_MODEL, torch_dtype=torch.float32
                 ).to("cpu").eval()
-                log.info("Sorani ASR model loaded successfully")
+                log.info("Sorani ASR acoustic model loaded successfully")
+
+    if ASR_USE_LM and not _asr_lm_attempted:
+        with _asr_load_lock:
+            if not _asr_lm_attempted:
+                _asr_lm_attempted = True
+                try:
+                    from huggingface_hub import hf_hub_download
+                    from pyctcdecode import build_ctcdecoder
+
+                    log.info("downloading/loading Sorani KenLM: %s/%s", ASR_MODEL, ASR_LM_FILE)
+                    lm_path = hf_hub_download(repo_id=ASR_MODEL, filename=ASR_LM_FILE)
+                    vocab = _asr_tokenizer.get_vocab()
+                    labels = [None] * len(vocab)
+                    for token, token_id in vocab.items():
+                        labels[token_id] = (
+                            " " if token == "|" else
+                            "" if token == _asr_tokenizer.pad_token else
+                            "⁇" if token == _asr_tokenizer.unk_token else token
+                        )
+                    _asr_decoder = build_ctcdecoder(
+                        labels,
+                        kenlm_model_path=lm_path,
+                        alpha=ASR_LM_ALPHA,
+                        beta=ASR_LM_BETA,
+                    )
+                    log.info("Sorani KenLM decoder loaded successfully (beam_width=%s)", ASR_BEAM_WIDTH)
+                except Exception:
+                    log.exception("Sorani KenLM decoder failed to load; falling back to greedy decoding")
+                    _asr_decoder = None
+    elif not ASR_USE_LM:
+        log.info("Sorani KenLM disabled; using greedy CTC decoding")
+
     return _asr_model, _asr_tokenizer, _asr_feature_extractor
 
 
@@ -2669,13 +2709,24 @@ def transcribe_file(wav_path, t0):
                     )
                     with torch.inference_mode():
                         logits = model(**inputs).logits
-                        token_ids = logits.argmax(dim=-1)
-                    text_out = (tokenizer.batch_decode(token_ids)[0] or "").strip()
+                        if _asr_decoder is not None:
+                            log_probs = torch.log_softmax(logits.float(), dim=-1).cpu().numpy()[0]
+                            text_out = _asr_decoder.decode(
+                                log_probs, beam_width=ASR_BEAM_WIDTH
+                            )
+                        else:
+                            token_ids = logits.argmax(dim=-1)
+                            text_out = tokenizer.batch_decode(token_ids)[0]
+                    text_out = (text_out or "").strip()
                     if text_out:
                         begin = offset / sample_rate
                         finish = min(duration, (offset + len(chunk)) / sample_rate)
                         segs.append((begin, finish, text_out))
-                    del inputs, logits, token_ids
+                    del inputs, logits
+                    if "token_ids" in locals():
+                        del token_ids
+                    if "log_probs" in locals():
+                        del log_probs
                 offset += len(chunk)
     info = SimpleNamespace(language="ckb", duration=duration)
     return segs, info, []
