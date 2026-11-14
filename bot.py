@@ -80,7 +80,7 @@ SEND_PDF_COPY     = env_int("SEND_PDF_COPY", 1)      # 1 = کۆپی PDF بۆ ه�
 OUT_VIDEO_MAX_MB  = env_int("OUT_VIDEO_MAX_MB", 20)             # سنووری دەرچوو — API ی فەرمی
 OUT_VIDEO_LOCAL_MAX_MB = env_int("OUT_VIDEO_LOCAL_MAX_MB", 400) # سنووری دەرچوو — سێرڤەری ناوخۆیی
 SHRINK_OVER_MB    = env_int("SHRINK_OVER_MB", 60)    # (کۆن) بچووکردنەوە ئێستا لەناو هەنگاوی سووتاندن خۆی دەکرێت
-WHISPER_MODEL     = (os.getenv("WHISPER_MODEL") or "base").strip()
+ASR_MODEL         = (os.getenv("ASR_MODEL") or "RawaHazhar/sorani-asr").strip()
 SOURCE_LANG       = (os.getenv("SOURCE_LANG") or "").strip() or None  # None = خۆکار
 GLM_API_KEY       = (os.getenv("GLM_API_KEY") or os.getenv("ZAI_API_KEY") or "").strip()
 GLM_API_URL       = (os.getenv("GLM_API_URL") or "https://api.z.ai/api/paas/v4").strip().rstrip("/")
@@ -2593,319 +2593,80 @@ def tg_send_video(chat, path, caption=None):
             return False
 
 
-_whisper_model = None
-_whisper_lock = threading.Lock()    # بارکردنی مۆدێل تەنها یەک جار — بێ کێشە لەگەڵ چەند thread
-_HARD_DEADLINE = None   # کۆتایی کاتی خول — لە main() دادەنرێت (بۆ ڕاوەستاندنی ئەرکی قورس)
+
+_asr_model = None
+_asr_tokenizer = None
+_asr_feature_extractor = None
+_asr_load_lock = threading.Lock()
+_asr_inference_lock = threading.Lock()
+_HARD_DEADLINE = None
 
 
 def _past_hard_deadline():
-    """True ئەگەر کاتی ڕەهای خول تێپەڕی بێت — هەنگاوی قورسی نوێ دەست پێ ناکات."""
+    """True ئەگەر کاتی ڕەهای خول تێپەڕی بێت."""
     return bool(_HARD_DEADLINE and time.time() > _HARD_DEADLINE)
 
 
-def get_whisper():
-    """مۆدێلی Whisper — thread-safe بار دەکرێت و بە چەند worker کاردەکات بۆ ئەوەی
-    چەند داواکاری بە یەک کات بگۆترێن (num_workers = MAX_CONCURRENT_JOBS)."""
-    global _whisper_model
-    if _whisper_model is None:
-        with _whisper_lock:
-            if _whisper_model is None:
-                from faster_whisper import WhisperModel
-                log.info("loading whisper model: %s (num_workers=%d)",
-                         WHISPER_MODEL, MAX_CONCURRENT_JOBS)
-                try:
-                    _whisper_model = WhisperModel(
-                        WHISPER_MODEL, device="cpu", compute_type="int8",
-                        num_workers=max(1, MAX_CONCURRENT_JOBS))
-                except TypeError:
-                    # وەشانی کۆنی faster-whisper — پارامەتری num_workers نییە
-                    _whisper_model = WhisperModel(WHISPER_MODEL, device="cpu",
-                                                  compute_type="int8")
-    return _whisper_model
+def get_asr():
+    """بارکردنی مۆدێلی ڕەسەنی Rawa Hazhar ـی Sorani ASR، تەنها یەک جار."""
+    global _asr_model, _asr_tokenizer, _asr_feature_extractor
+    if _asr_model is None:
+        with _asr_load_lock:
+            if _asr_model is None:
+                import torch
+                from transformers import (
+                    Wav2Vec2BertForCTC,
+                    Wav2Vec2CTCTokenizer,
+                    SeamlessM4TFeatureExtractor,
+                )
+                log.info("loading Sorani ASR model: %s on CPU", ASR_MODEL)
+                torch.set_num_threads(max(1, min(4, os.cpu_count() or 1)))
+                _asr_tokenizer = Wav2Vec2CTCTokenizer.from_pretrained(ASR_MODEL)
+                _asr_feature_extractor = SeamlessM4TFeatureExtractor.from_pretrained(ASR_MODEL)
+                _asr_model = Wav2Vec2BertForCTC.from_pretrained(
+                    ASR_MODEL, torch_dtype=torch.float32
+                ).to("cpu").eval()
+                log.info("Sorani ASR model loaded successfully")
+    return _asr_model, _asr_tokenizer, _asr_feature_extractor
 
 
 def transcribe_file(wav_path, t0):
-    """وەرگێڕانی دەنگ بە Whisper — لەگەڵ کاتی وردی هەر وشەیەک (word_timestamps):
-    هەر وشەیەک کاتە وردەکەی خۆی هەیە → ژێرنووسی کوردی ڕێک لە هەمان چرکەی
-    قسەکردنی ڕەسەن دەردەکەوێت، تەنانەت ئەگەر Whisper هەموو ڤیدیۆکە بە یەک
-    بەش بگەڕێنێتەوەش (کە پێشتر دەبوایە بە ڕێژە دابەشی بکەین — نزیکەیی)."""
-    model = get_whisper()
-    seg_iter, info = model.transcribe(
-        wav_path,
-        language=SOURCE_LANG,
-        vad_filter=True,
-        vad_parameters={"min_silence_duration_ms": 500},
-        word_timestamps=True,
-        beam_size=1,                      # greedy — نزیکەی ٢ جار خێراتر لە beam=5
-        condition_on_previous_text=False, # ڕێگری لە لوپسی هەڵە و بەرزکردنەوەی خێرایی
-    )
-    segs, words = [], []
-    for s in seg_iter:
-        if time.time() - t0 > HEAVY_BUDGET:
-            raise BotError(ERR_LONG)
-        if _HARD_DEADLINE and time.time() > _HARD_DEADLINE:
-            raise BotError(ERR_LONG)
-        txt = (s.text or "").strip()
-        if txt:
-            segs.append((float(s.start), float(s.end), txt))
-        for w in (getattr(s, "words", None) or []):
-            try:
-                wtxt = (getattr(w, "word", "") or "").strip()
-                wst, wen = float(w.start), float(w.end)
-            except (TypeError, ValueError):
+    """نووسینەوەی دەنگی سۆرانی بە مۆدێلی RawaHazhar؛ بەشی دەنگ هەر یەک تا ٢٠ چرکە."""
+    import librosa
+    import numpy as np
+    import torch
+    from types import SimpleNamespace
+
+    model, tokenizer, feature_extractor = get_asr()
+    audio, _ = librosa.load(wav_path, sr=16000, mono=True)
+    if audio.size == 0:
+        return [], SimpleNamespace(language="ckb", duration=0.0), []
+    duration = float(len(audio)) / 16000.0
+    segs = []
+    chunk_samples = 20 * 16000
+
+    # مۆدێلی ٦٠٠ ملیۆن پارامەترییە؛ inference بە یەک جار دەکرێت بۆ پاراستنی RAM.
+    with _asr_inference_lock:
+        for offset in range(0, len(audio), chunk_samples):
+            if time.time() - t0 > HEAVY_BUDGET or _past_hard_deadline():
+                raise BotError(ERR_LONG)
+            chunk = np.asarray(audio[offset:offset + chunk_samples], dtype=np.float32)
+            if len(chunk) < int(0.5 * 16000):
                 continue
-            if wtxt and wen >= wst:
-                words.append((wst, wen, wtxt))
-    return segs, info, words
-
-
-def merge_cues(segs, max_dur=12.0, max_gap=1.2):
-    """یەکخستنی بەشە بچووکەکان بۆ ژێرنووسی خوێندنئاسان."""
-    out, cur = [], None
-    for st, en, txt in segs:
-        if cur is not None and (en - cur[0]) <= max_dur and (st - cur[1]) <= max_gap:
-            cur = (cur[0], en, (cur[2] + " " + txt).strip())
-        else:
-            if cur is not None:
-                out.append(cur)
-            cur = (st, en, txt)
-    if cur is not None:
-        out.append(cur)
-    return out
-
-
-def split_long_cues(cues, max_dur=12.0, max_chars=95):
-    """بەشە زۆر درێژەکان دەکات بە چەند ژێرنووسی بچووکتر:
-    - خوێندنئاسانتر لەسەر ڤیدیۆ
-    - وەرگێڕان بە پارچەی بچووکتر — متمانەبەخۆتر و خێراتر
-    کاتەکان بەپێی درێژی دەق بە شێوەی ڕێژەیی دابەش دەکرێن."""
-    out = []
-    for st, en, txt in cues:
-        txt = (txt or "").strip()
-        if not txt:
-            continue
-        dur = max(0.4, float(en) - float(st))
-        if dur <= max_dur and len(txt) <= max_chars:
-            out.append((float(st), float(en), txt))
-            continue
-        words = txt.split()
-        cps = max(1.0, len(txt) / dur)   # پیت بۆ چرکە (بەرگری لە دابەشکردن بە سفر)
-        t_cur = float(st)
-        buf = ""
-        for w in words:
-            cand = (buf + " " + w) if buf else w
-            over_time = len(cand) / cps > max_dur
-            if len(cand) > max_chars or over_time:
-                if buf:
-                    t_next = min(float(en), t_cur + len(buf) / cps)
-                    out.append((t_cur, max(t_next, t_cur + 0.4), buf))
-                    t_cur = t_next
-                buf = w
-            else:
-                buf = cand
-        if buf:
-            out.append((t_cur, float(en), buf))
-    return out
-
-
-def cues_from_words(words, max_dur=7.0, max_chars=95, max_gap=0.9):
-    """دروستکردنی ژێرنووس لە کاتی وردی وشەکان (word_timestamps):
-    هەر ژێرنووسێک لە کاتی دەستپێکی یەکەم وشەی خۆی تا کۆتا وشەی خۆی دانراوە —
-    بۆیە وەرگێڕانی کوردی ڕێک لە هەمان چرکەی قسەکردنی ڕەسەن دەردەکەوێت.
-    پچڕان بۆ ژێرنووسی نوێ لە حاڵەتی:
-    - پشووی سروشتی قسەکردن (بۆشایی > max_gap چرکە)
-    - کۆتایی ڕستە (خاڵبەندی + پشووێکی بچووک)
-    - درێژی کات > max_dur یان ژمارەی پیت > max_chars."""
-    out = []
-    buf = []
-    cur_start = None
-    cur_end = None
-    prev_end = None
-
-    def flush():
-        if buf:
-            st = float(cur_start)
-            en = max(float(cur_end), st + 0.4)
-            out.append((st, en, " ".join(buf)))
-            buf.clear()
-
-    for wst, wen, wtxt in words:
-        wtxt = (wtxt or "").strip()
-        if not wtxt:
-            continue
-        gap = (wst - prev_end) if prev_end is not None else 0.0
-        endpunct = bool(buf) and buf[-1][-1:] in ".!?؟۔،,;:—"
-        if buf and (
-            gap > max_gap
-            or (endpunct and gap > 0.30)
-            or (wen - cur_start) > max_dur
-            or (len(" ".join(buf)) + 1 + len(wtxt)) > max_chars
-        ):
-            flush()
-        if not buf:
-            cur_start = wst
-        buf.append(wtxt)
-        cur_end = wen
-        prev_end = wen
-    flush()
-    return out
-
-
-def render_srt(cues, texts):
-    blocks = []
-    for i, ((st, en, _), t) in enumerate(zip(cues, texts), 1):
-        blocks.append("%d\n%s --> %s\n%s\n" % (i, ts(st), ts(en), (t or "").strip()))
-    return "\n".join(blocks)
-
-
-def build_transcript_docx(cues, texts, out_path, title=""):
-    doc = DocxDocument()
-    if title:
-        p = doc.add_paragraph(title[:120])
-        _set_bidi_docx(p)
-    for (st, en, _), t in zip(cues, texts):
-        p = doc.add_paragraph("[%s] %s" % (ts(st), (t or "").strip()))
-        _set_bidi_docx(p)
-    doc.save(out_path)
-
-
-def _ytdl_base_opts(workdir, fmt=None):
-    """ئۆپشنە بنەڕەتییەکانی yt-dlp — بۆ هەموو هەوڵەکان."""
-    import yt_dlp
-    import yt_dlp.utils
-    if not fmt:
-        fmt = ("best[height<=720]+bestaudio/best[height<=720]/bestaudio/best"
-               if BURN_SUBTITLES else "bestaudio/best")  # ڤیدیۆ پێویستە بۆ ژێرنووس
-    opts = {
-        "format": fmt,
-        "outtmpl": os.path.join(workdir, "src.%(ext)s"),
-        "noplaylist": True,
-        "quiet": True,
-        "no_warnings": True,
-        "socket_timeout": 30,
-        "retries": 3,
-        "restrictfilenames": True,
-    }
-    if MAX_VIDEO_MINUTES > 0:
-        opts["match_filter"] = yt_dlp.utils.match_filter_func(
-            "duration<=%d" % (MAX_VIDEO_MINUTES * 60))
-    if YT_COOKIES:
-        cf = os.path.join(workdir, "cookies.txt")
-        with open(cf, "w", encoding="utf-8") as fh:
-            fh.write(YT_COOKIES + "\n")
-        opts["cookiefile"] = cf
-    return opts
-
-
-def _ytdl_extract(url, workdir, opts):
-    """یەک هەوڵی داگرتن — (path, title, duration) دەگەڕێنێتەوە."""
-    import yt_dlp
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-        if info.get("_type") == "playlist" and info.get("entries"):
-            info = info["entries"][0]
-        path = None
-        for d in (info.get("requested_downloads") or []):
-            if d.get("filepath"):
-                path = d["filepath"]
-                break
-        if not path:
-            path = ydl.prepare_filename(info)
-        if not os.path.exists(path):
-            g = sorted(glob.glob(os.path.join(workdir, "src.*")))
-            if not g:
-                # ڕەنگە match_filter ڤیدیۆکەی ڕەت کردبێتەوە (زۆر درێژە)
-                dur = info.get("duration") or 0
-                if MAX_VIDEO_MINUTES > 0 and dur > MAX_VIDEO_MINUTES * 60:
-                    raise BotError(err_too_long())
-                raise RuntimeError("downloaded file not found")
-            path = g[-1]
-        title = info.get("title") or "video"
-        duration = info.get("duration") or 0
-    return path, title, duration
-
-
-def _is_format_err(text):
-    """ئایا هەڵەکە «فۆرمات بەردەست نییە»یە؟
-    یووتیوب بە SABR/PO Token فۆرماتە داگرتنییەکان بۆ ئایپی سێرڤەرەکان دەخات —
-    extraction سەرکەوتووە بەڵام هیچ فۆرماتێکی داگرتنی نامێنێتەوە."""
-    t = (text or "").lower()
-    return ("requested format is not available" in t
-            or "no video formats" in t
-            or "page needs to be reloaded" in t)
-
-
-def _log_available_formats(url, client, probe):
-    """دیagnostics: لیستی فۆرماتەکانی ڕاپۆرتکراو بۆ لۆگی Actions (تەنها یەک جار)."""
-    if probe.get("done"):
-        return
-    probe["done"] = True
-    try:
-        import yt_dlp
-        opts = {"quiet": True, "no_warnings": True, "socket_timeout": 20,
-                "noplaylist": True}
-        if client and client != "default":
-            opts["extractor_args"] = {"youtube": {"player_client": [client]}}
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            info = ydl.extract_info(url, download=False)
-        fmts = info.get("formats") or []
-        rows = []
-        for f in fmts[:14]:
-            rows.append("id=%s ext=%s h=%s proto=%s %s" % (
-                f.get("format_id"), f.get("ext"), f.get("height"),
-                f.get("protocol"), (f.get("format_note") or "")))
-        log.info("yt-dlp probe [%s]: %d format(s) reported\n  %s",
-                 client, len(fmts), "\n  ".join(rows) if rows else "(no formats listed)")
-    except Exception as e:
-        msg = str(e).splitlines()[0][:200] if str(e) else repr(e)
-        log.info("yt-dlp probe [%s] failed: %s", client, msg)
-
-
-def _ytdl_attempt_chain(url, workdir, fmt, errors, probe):
-    """یەک خول — بۆ هەموو کلیێنتەکان هەوڵ دەدرێت بە فۆرماتی دیاریکراو. None = هەموویان شکا."""
-    for i, client in enumerate(YT_CLIENTS):
-        opts = dict(_ytdl_base_opts(workdir, fmt))
-        if client and client != "default":
-            opts["extractor_args"] = {"youtube": {"player_client": [client]}}
-        try:
-            out = _ytdl_extract(url, workdir, opts)
-            log.info("yt-dlp: success with client '%s' for %s", client, url)
-            return out
-        except BotError:
-            raise                      # هەڵەی دۆستانە (وەکو ڤیدیۆی درێژ) — دووبارەی نەکەوە
-        except Exception as e:
-            err = str(e) or repr(e)
-            first = err.splitlines()[0][:220] if err else err
-            errors.append("[%s] %s" % (client, first))
-            log.warning("yt-dlp [%s] failed for %s: %s", client, url,
-                        err.splitlines()[0][:300] if err else err)
-            if _is_format_err(err):
-                _log_available_formats(url, client, probe)
-            if i < len(YT_CLIENTS) - 1:
-                time.sleep(1.0)        # کەمێک چاوەڕێ بکە — نەک لە یەک چرکەدا چەند داواکاری
-    return None
-
-
-def ytdl_download(url, workdir):
-    """داگرتنی لینک — ٥ کلیێنت × ٢ خول (ڤیدیۆ، پاشان تەنها دەنگ).
-    یووتیوب لە ئایپییەکانی GitHub زۆر جار: ① کلیێنتی بنەڕەتی ڕەت دەکات
-    («Sign in to confirm you're not a bot») ② یان فۆرماتەکان دەخات
-    («Requested format is not available» — SABR/PO Token).
-    خولی دووەم تەنها دەنگ دەگرێت — SRT و Word و PDF هێشتا بە تەواوی دەنێردرێن
-    (تەنها ژێرنووس لەسەر ڤیدیۆ ناکرێت). (path, title, duration, audio_only) دەگەڕێنێتەوە."""
-    fmt_video = ("best[height<=720]+bestaudio/best[height<=720]/bestaudio/best"
-                 if BURN_SUBTITLES else "bestaudio/best")
-    probe = {}
-    errors = []
-    out = _ytdl_attempt_chain(url, workdir, fmt_video, errors, probe)
-    if out:
-        return out + (False,)
-    if fmt_video != "bestaudio/best" and any(_is_format_err(e) for e in errors):
-        log.info("yt-dlp: no video formats from any client — trying audio-only fallback for %s", url)
-        out = _ytdl_attempt_chain(url, workdir, "bestaudio/best", errors, probe)
-        if out:
-            return out + (True,)
-    raise BotError(err_link(" | ".join(errors)))
+            inputs = feature_extractor(
+                [chunk], sampling_rate=16000, return_tensors="pt"
+            )
+            with torch.inference_mode():
+                logits = model(**inputs).logits
+                token_ids = logits.argmax(dim=-1)
+            text_out = (tokenizer.batch_decode(token_ids)[0] or "").strip()
+            if text_out:
+                begin = offset / 16000.0
+                finish = min(duration, (offset + len(chunk)) / 16000.0)
+                segs.append((begin, finish, text_out))
+            del inputs, logits, token_ids
+    info = SimpleNamespace(language="ckb", duration=duration)
+    return segs, info, []
 
 
 def run_speech_pipeline(src_path, chat, workdir, state=None, title=None):
@@ -3491,7 +3252,7 @@ def self_check():
     print("Sorani font:", ("OK — " + os.path.basename(_font)) if _font else "MISSING / no font with complete Sorani glyph coverage")
 
     print("GLM fallback:", ("enabled, models=" + ",".join(GLM_MODELS)) if GLM_API_KEY else "not configured (Google only)")
-    print("whisper model:", WHISPER_MODEL, "| max video minutes:", MAX_VIDEO_MINUTES or "unlimited")
+    print("Sorani ASR model:", ASR_MODEL, "| max video minutes:", MAX_VIDEO_MINUTES or "unlimited")
     print("ffmpeg:", shutil.which("ffmpeg") or "MISSING")
     print("libreoffice:", shutil.which("soffice") or "missing (ReportLab fallback will be used)")
     print("tesseract OCR:", shutil.which("tesseract") or "missing (scanned PDFs will fail)")
@@ -3529,10 +3290,13 @@ def self_check():
     except Exception as e:
         print("yt-dlp: FAIL", e)
     try:
-        import faster_whisper  # noqa
-        print("faster-whisper: OK")
+        import torch
+        import librosa
+        import transformers
+        print("Sorani ASR dependencies: OK | torch=%s transformers=%s" %
+              (torch.__version__, transformers.__version__))
     except Exception as e:
-        print("faster-whisper: FAIL", e)
+        print("Sorani ASR dependencies: FAIL", e)
     for i, (host, client, use_dj) in enumerate(GTX_HOSTS, 1):
         name = host.split("/")[2]
         try:
