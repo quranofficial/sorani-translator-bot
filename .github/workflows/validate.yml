@@ -29,7 +29,15 @@ jobs:
       - name: Install system font and media tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends fonts-noto-core ffmpeg tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng
+          sudo apt-get install -y --no-install-recommends fonts-noto-core ffmpeg tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng build-essential cmake libboost-all-dev
+
+      - name: Cache Hugging Face acoustic and language models
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-sorani-asr-${{ runner.os }}-v1
+          restore-keys: |
+            hf-sorani-asr-${{ runner.os }}-
 
       - name: Install CPU-only PyTorch
         run: |
@@ -50,6 +58,14 @@ jobs:
           python -m py_compile bot.py
           python bot.py --check | tee startup-check.log
           grep -q "Sorani font: OK" startup-check.log
+          python - <<'PY'
+          import bot
+          model, tokenizer, feature_extractor = bot.get_asr()
+          assert model is not None and tokenizer is not None and feature_extractor is not None
+          assert bot._asr_decoder is not None, "KenLM decoder did not load"
+          print("Sorani acoustic model: OK")
+          print("Sorani KenLM decoder: OK")
+          PY
           if [ -n "$KURDISH_TTS_API_KEY" ]; then
             grep -q "Kurdish TTS: OK" startup-check.log
           else
