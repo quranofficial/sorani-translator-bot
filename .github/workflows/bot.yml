@@ -72,6 +72,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends -o Acquire::Retries=3 \
             ffmpeg fonts-noto-core libreoffice-writer libreoffice-impress \
             tesseract-ocr tesseract-ocr-ara tesseract-ocr-eng \
+            build-essential cmake libboost-all-dev \
             || sudo apt-get install -y --no-install-recommends ffmpeg fonts-noto-core
           sudo cp -n /var/cache/apt/archives/*.deb ~/apt-cache/ 2>/dev/null || true
 
@@ -160,6 +161,11 @@ jobs:
           YT_COOKIES: ${{ secrets.YT_COOKIES }}
           YT_CLIENTS: ${{ vars.YT_CLIENTS || 'default,android_vr,web_safari,tv,web_embedded' }}
           ASR_MODEL: ${{ vars.ASR_MODEL || 'RawaHazhar/sorani-asr' }}
+          ASR_USE_LM: "1"
+          ASR_LM_FILE: "sorani5_clean3.bin"
+          ASR_LM_ALPHA: "0.5"
+          ASR_LM_BETA: "1.0"
+          ASR_BEAM_WIDTH: "100"
           MAX_VIDEO_MINUTES: ${{ vars.MAX_VIDEO_MINUTES }}
           MAX_CONCURRENT_JOBS: "1"   # مۆدێلی ASR گەورەیە؛ inference بە یەک جار بۆ پاراستنی RAM
           MAX_QUEUE: "8"             # زۆرترین ڕیزی چاوەڕوانی پێش پەیامی «ڕیزەکە پڕە»
