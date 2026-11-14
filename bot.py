@@ -2632,39 +2632,51 @@ def get_asr():
 
 def transcribe_file(wav_path, t0):
     """نووسینەوەی دەنگی سۆرانی بە مۆدێلی RawaHazhar؛ بەشی دەنگ هەر یەک تا ٢٠ چرکە."""
-    import librosa
     import numpy as np
+    import soundfile as sf
     import torch
     from types import SimpleNamespace
 
     model, tokenizer, feature_extractor = get_asr()
-    audio, _ = librosa.load(wav_path, sr=16000, mono=True)
-    if audio.size == 0:
-        return [], SimpleNamespace(language="ckb", duration=0.0), []
-    duration = float(len(audio)) / 16000.0
     segs = []
     chunk_samples = 20 * 16000
 
-    # مۆدێلی ٦٠٠ ملیۆن پارامەترییە؛ inference بە یەک جار دەکرێت بۆ پاراستنی RAM.
-    with _asr_inference_lock:
-        for offset in range(0, len(audio), chunk_samples):
-            if time.time() - t0 > HEAVY_BUDGET or _past_hard_deadline():
-                raise BotError(ERR_LONG)
-            chunk = np.asarray(audio[offset:offset + chunk_samples], dtype=np.float32)
-            if len(chunk) < int(0.5 * 16000):
-                continue
-            inputs = feature_extractor(
-                [chunk], sampling_rate=16000, return_tensors="pt"
-            )
-            with torch.inference_mode():
-                logits = model(**inputs).logits
-                token_ids = logits.argmax(dim=-1)
-            text_out = (tokenizer.batch_decode(token_ids)[0] or "").strip()
-            if text_out:
-                begin = offset / 16000.0
-                finish = min(duration, (offset + len(chunk)) / 16000.0)
-                segs.append((begin, finish, text_out))
-            del inputs, logits, token_ids
+    # خوێندنەوەی streaming: دەنگی درێژ بە تەواوی لە RAM بار ناکرێت.
+    with sf.SoundFile(wav_path) as audio_file:
+        sample_rate = int(audio_file.samplerate)
+        if sample_rate != 16000:
+            raise BotError("فایلی دەنگ دەبێت 16kHz بێت؛ هەوڵی دووبارەکردنەوە بکە.")
+        total_frames = len(audio_file)
+        duration = float(total_frames) / sample_rate
+        if total_frames <= 0:
+            return [], SimpleNamespace(language="ckb", duration=0.0), []
+
+        # مۆدێلی ٦٠٠ ملیۆن پارامەترییە؛ inference بە یەک جار دەکرێت بۆ پاراستنی RAM.
+        with _asr_inference_lock:
+            offset = 0
+            while offset < total_frames:
+                if time.time() - t0 > HEAVY_BUDGET or _past_hard_deadline():
+                    raise BotError(ERR_LONG)
+                chunk = np.asarray(
+                    audio_file.read(frames=chunk_samples, dtype="float32", always_2d=False),
+                    dtype=np.float32
+                )
+                if chunk.size == 0:
+                    break
+                if len(chunk) >= int(0.5 * sample_rate):
+                    inputs = feature_extractor(
+                        [chunk], sampling_rate=sample_rate, return_tensors="pt"
+                    )
+                    with torch.inference_mode():
+                        logits = model(**inputs).logits
+                        token_ids = logits.argmax(dim=-1)
+                    text_out = (tokenizer.batch_decode(token_ids)[0] or "").strip()
+                    if text_out:
+                        begin = offset / sample_rate
+                        finish = min(duration, (offset + len(chunk)) / sample_rate)
+                        segs.append((begin, finish, text_out))
+                    del inputs, logits, token_ids
+                offset += len(chunk)
     info = SimpleNamespace(language="ckb", duration=duration)
     return segs, info, []
 
@@ -3291,10 +3303,10 @@ def self_check():
         print("yt-dlp: FAIL", e)
     try:
         import torch
-        import librosa
+        import soundfile
         import transformers
-        print("Sorani ASR dependencies: OK | torch=%s transformers=%s" %
-              (torch.__version__, transformers.__version__))
+        print("Sorani ASR dependencies: OK | torch=%s transformers=%s soundfile=%s" %
+              (torch.__version__, transformers.__version__, soundfile.__version__))
     except Exception as e:
         print("Sorani ASR dependencies: FAIL", e)
     for i, (host, client, use_dj) in enumerate(GTX_HOSTS, 1):
